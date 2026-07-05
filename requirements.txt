@@ -1,0 +1,11 @@
+# The cost model, registry, and scenario map (kvlab.memory / registry / scenarios)
+# run on the Python standard library alone. Everything below is for the model
+# backends and evaluations.
+
+torch>=2.1
+transformers>=4.44
+datasets>=2.19
+
+# Optional: real long-context methods and standardized evaluation.
+# kvpress>=0.2
+# optimum-quanto>=0.2   # for quantized KV cache
