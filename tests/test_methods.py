@@ -85,6 +85,19 @@ def test_key_scores_window_ignores_earlier_queries():
     assert scores.argmax(dim=-1).unique().item() == inside
 
 
+def test_snapkv_pooling_keeps_clusters_together():
+    k, v = position_coded_kv()
+    spike = 8
+    pool = 3
+    attn = torch.zeros(B, H, S, S)
+    attn[:, :, -RECENT:, spike] = 1.0
+    budget = RECENT + pool
+    (ok_pooled, _), = SnapKV(budget=budget, window=RECENT, pool=pool).apply(((k.clone(), v.clone()),), (attn,))
+    assert kept_positions(ok_pooled) >= set(range(spike - pool // 2, spike + pool // 2 + 1))
+    (ok_unpooled, _), = SnapKV(budget=budget, window=RECENT, pool=1).apply(((k.clone(), v.clone()),), (attn,))
+    assert spike in kept_positions(ok_unpooled)
+
+
 def test_methods_report_the_len_they_produce():
     k, v = position_coded_kv()
     attns = tuple(torch.rand(B, H, S, S) for _ in range(2))

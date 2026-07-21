@@ -39,6 +39,9 @@ class KVMethod:
 
 
 def _key_scores(attn, n_kv_heads, window=None):
+    """Per-token importance from attention weights, [batch, kv_heads, seq].
+    Under GQA, the query heads sharing a KV head are summed; sum vs mean does
+    not change any within-layer top-k because the group size is uniform."""
     if window is not None:
         attn = attn[:, :, -window:, :]
     scores = attn.sum(dim=2)
@@ -46,6 +49,14 @@ def _key_scores(attn, n_kv_heads, window=None):
     if qh != n_kv_heads:
         scores = scores.view(b, n_kv_heads, qh // n_kv_heads, k).sum(dim=2)
     return scores
+
+
+def _pool_scores(scores, kernel_size):
+    """SnapKV's clustering step: max-pool scores along the key axis so a
+    high-scoring token lifts its neighbours and contiguous spans survive
+    together, instead of isolated tokens surrounded by evicted context."""
+    import torch.nn.functional as F
+    return F.max_pool1d(scores, kernel_size=kernel_size, stride=1, padding=kernel_size // 2)
 
 
 def _evict_indices(scores, budget, recent):
@@ -133,14 +144,23 @@ class H2O(KVMethod):
 
 
 class SnapKV(KVMethod):
+    """Observation-window voting with max-pooled clustering (arXiv:2404.14469):
+    the last `window` queries score every prompt token, pooling keeps clusters
+    of context together, and the window itself is always retained."""
+
     key, name, family, lever, bits = "snapkv", "SnapKV", "Eviction", "context", 16
 
-    def __init__(self, budget=128, window=32):
-        self.budget, self.window = budget, window
+    def __init__(self, budget=128, window=32, pool=7):
+        self.budget, self.window, self.pool = budget, window, pool
 
     def apply(self, past_key_values, attentions):
-        return tuple(_evict(k, v, _key_scores(attn, k.shape[1], self.window), self.budget, self.window)
-                     for (k, v), attn in zip(past_key_values, attentions))
+        out = []
+        for (k, v), attn in zip(past_key_values, attentions):
+            scores = _key_scores(attn, k.shape[1], self.window)
+            if self.pool > 1:
+                scores = _pool_scores(scores, self.pool)
+            out.append(_evict(k, v, scores, self.budget, self.window))
+        return tuple(out)
 
     def kept_len(self, orig_len):
         return min(self.budget, orig_len)
@@ -181,8 +201,8 @@ class CAKE(KVMethod):
 
     key, name, family, lever, bits = "cake", "CAKE", "Eviction", "context", 16
 
-    def __init__(self, budget=128, window=32, tau1=1.0, tau2=1.0):
-        self.budget, self.window = budget, window
+    def __init__(self, budget=128, window=32, pool=7, tau1=1.0, tau2=1.0):
+        self.budget, self.window, self.pool = budget, window, pool
         self.tau1, self.tau2 = tau1, tau2
         self._layer_budgets: list[int] | None = None
 
@@ -228,6 +248,8 @@ class CAKE(KVMethod):
         out = []
         for (k, v), attn, layer_budget in zip(past_key_values, attentions, self._layer_budgets):
             scores = _key_scores(attn, k.shape[1], self.window)
+            if self.pool > 1:
+                scores = _pool_scores(scores, self.pool)
             out.append(_evict(k, v, scores, layer_budget, self.window))
         return tuple(out)
 
