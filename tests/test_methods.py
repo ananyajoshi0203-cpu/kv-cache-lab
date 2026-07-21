@@ -12,7 +12,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kvlab import memory                                            # noqa: E402
 from kvlab.methods import (                                         # noqa: E402
-    H2O, FullCache, KIVIQuant, SnapKV, _evict, _fake_quant, _key_scores, build,
+    CAKE, H2O, FullCache, KIVIQuant, SnapKV, _evict, _fake_quant, _key_scores, build,
 )
 
 B, H, S, D = 1, 2, 24, 4
@@ -91,6 +91,57 @@ def test_methods_report_the_len_they_produce():
     for method in (H2O(budget=BUDGET, recent=RECENT), SnapKV(budget=BUDGET, window=RECENT), FullCache()):
         out = method.apply(tuple((k.clone(), v.clone()) for k, v in pkv), attns)
         assert all(ok.shape[2] == method.kept_len(S) for ok, _ in out)
+
+
+def _uniform_attention():
+    return torch.full((B, H, S, S), 1.0 / S)
+
+
+def _one_hot_attention(target):
+    attn = torch.zeros(B, H, S, S)
+    attn[:, :, :, target] = 1.0
+    return attn
+
+
+def test_cake_layer_budgets_sum_to_global_budget():
+    torch.manual_seed(3)
+    n_layers = 3
+    k, v = position_coded_kv()
+    pkv = tuple((k.clone(), v.clone()) for _ in range(n_layers))
+    attns = tuple(torch.rand(B, H, S, S).softmax(dim=-1) for _ in range(n_layers))
+    method = CAKE(budget=BUDGET, window=RECENT)
+    method.apply(pkv, attns)
+    assert sum(method._layer_budgets) == BUDGET * n_layers
+
+
+def test_cake_gives_dispersed_layers_more_budget():
+    k, v = position_coded_kv()
+    pkv = tuple((k.clone(), v.clone()) for _ in range(2))
+    dispersed = _uniform_attention()
+    dispersed[:, :, ::2, 0] += 0.01
+    focused = _one_hot_attention(target=3)
+    method = CAKE(budget=BUDGET, window=RECENT)
+    method.apply(pkv, (dispersed, focused))
+    dispersed_budget, focused_budget = method._layer_budgets
+    assert dispersed_budget > focused_budget
+
+
+def test_cake_every_layer_keeps_its_window():
+    k, v = position_coded_kv()
+    pkv = tuple((k.clone(), v.clone()) for _ in range(2))
+    out = CAKE(budget=BUDGET, window=RECENT).apply(pkv, (_uniform_attention(), _one_hot_attention(3)))
+    for ok, _ in out:
+        assert kept_positions(ok) >= set(range(S - RECENT, S))
+
+
+def test_cake_bytes_equal_flat_budget_when_layers_identical():
+    cfg = memory.MODELS["distilgpt2"]
+    k, v = position_coded_kv()
+    pkv = tuple((k.clone(), v.clone()) for _ in range(cfg.layers))
+    attns = tuple(_uniform_attention() for _ in range(cfg.layers))
+    method = CAKE(budget=BUDGET, window=RECENT)
+    method.apply(pkv, attns)
+    assert method.kv_bytes(S, cfg) == memory.cache_bytes(cfg, BUDGET, "fp16")
 
 
 def test_kivi_residual_untouched():

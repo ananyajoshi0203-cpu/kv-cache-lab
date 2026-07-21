@@ -79,10 +79,12 @@ SAMPLE_TEXT = (
 
 def _score(model, cont_ids, past_key_values, start_pos):
     import torch
-    from .model import tuples_to_cache
+    from .model import per_layer_mask_fit, tuples_to_cache
     pos = torch.arange(start_pos, start_pos + cont_ids.shape[1], device=cont_ids.device).unsqueeze(0)
-    out = model(input_ids=cont_ids, past_key_values=tuples_to_cache(past_key_values),
-                position_ids=pos, use_cache=False)
+    key_lens = [k.shape[2] for k, _ in past_key_values]
+    with per_layer_mask_fit(model, key_lens):
+        out = model(input_ids=cont_ids, past_key_values=tuples_to_cache(past_key_values),
+                    position_ids=pos, use_cache=False)
     logits, targets = out.logits[:, :-1, :], cont_ids[:, 1:]
     nll = torch.nn.functional.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
     return float(math.exp(nll.item()))
@@ -97,7 +99,7 @@ def derive_kwargs(key: str, prefill: int, ratio: float, recent: int, cfg) -> dic
     token count; KIVI's bit width is picked by its true byte accounting, fp16
     residual included."""
     keep = 1.0 - ratio
-    if key in ("h2o", "snapkv"):
+    if key in ("h2o", "snapkv", "cake"):
         budget = max(1, round(prefill * keep))
         window = {"recent": recent} if key == "h2o" else {"window": recent}
         return {"budget": budget, **window}

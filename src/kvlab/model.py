@@ -6,6 +6,7 @@ dependency-free."""
 from __future__ import annotations
 
 import logging
+from contextlib import contextmanager
 
 from .memory import ModelConfig
 
@@ -35,6 +36,45 @@ def load_model(name: str = "distilgpt2", device: str = "cpu"):
     head_dim = getattr(hf, "head_dim", None) or (hidden // n_heads)
 
     return model, tok, ModelConfig(name, n_layers, n_heads, n_kv, head_dim)
+
+
+@contextmanager
+def per_layer_mask_fit(model, key_lens):
+    """Let a ragged cache -- different kept lengths per layer, as produced by
+    layer-adaptive budgets (CAKE, Ada-KV) -- run through a stock forward pass.
+
+    The model builds one additive attention mask sized to a single cache length,
+    which raises a shape error as soon as layers disagree. Cache positions are
+    uniformly visible (zero) in that mask and only the causal tail over the new
+    queries differs, so trimming the mask's key axis to each layer's true length
+    (or left-padding it with visible zeros) is exact, not an approximation.
+    Registers a forward-pre-hook per attention module; removed on exit."""
+    import torch.nn.functional as F
+
+    blocks = model.transformer.h if hasattr(model, "transformer") else model.model.layers
+
+    def fit(key_len):
+        def hook(module, args, kwargs):
+            mask = kwargs.get("attention_mask")
+            if mask is None:
+                return None
+            target = key_len + mask.shape[-2]
+            if mask.shape[-1] > target:
+                kwargs["attention_mask"] = mask[..., -target:]
+            elif mask.shape[-1] < target:
+                kwargs["attention_mask"] = F.pad(mask, (target - mask.shape[-1], 0))
+            return args, kwargs
+        return hook
+
+    handles = []
+    try:
+        for block, key_len in zip(blocks, key_lens):
+            attn = block.attn if hasattr(block, "attn") else block.self_attn
+            handles.append(attn.register_forward_pre_hook(fit(key_len), with_kwargs=True))
+        yield
+    finally:
+        for handle in handles:
+            handle.remove()
 
 
 def cache_to_tuples(cache):

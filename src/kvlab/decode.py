@@ -19,7 +19,7 @@ def generate_stepwise(model, ids, method, max_new_tokens: int = 64, eos_token_id
     """Greedy-decode continuation ids of shape [batch, <=max_new_tokens]."""
     import torch
 
-    from .model import cache_to_tuples, tuples_to_cache
+    from .model import cache_to_tuples, per_layer_mask_fit, tuples_to_cache
 
     with torch.no_grad():
         out = model(ids, use_cache=True, output_attentions=True)
@@ -37,7 +37,8 @@ def generate_stepwise(model, ids, method, max_new_tokens: int = 64, eos_token_id
         if eos_token_id is not None and (next_id == eos_token_id).all():
             break
         position_ids = torch.full((ids.shape[0], 1), position, dtype=torch.long, device=ids.device)
-        with torch.no_grad():
+        key_lens = [k.shape[2] for k, _ in pkv]
+        with torch.no_grad(), per_layer_mask_fit(model, key_lens):
             out = model(input_ids=next_id, past_key_values=tuples_to_cache(pkv),
                         position_ids=position_ids, use_cache=True, output_attentions=True)
         pkv = method.step(cache_to_tuples(out.past_key_values), out.attentions)

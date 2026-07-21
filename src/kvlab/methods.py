@@ -146,6 +146,77 @@ class SnapKV(KVMethod):
         return min(self.budget, orig_len)
 
 
+class CAKE(KVMethod):
+    """Layer-adaptive budget allocation (CAKE, arXiv:2503.12491) in reference
+    form. Each layer's preference combines spatial dispersion (entropy of its
+    mean attention distribution over the observation window) with temporal shift
+    (variance of that distribution across window queries); the global token
+    budget -- `budget` per layer on average -- is split proportionally, then each
+    layer evicts with SnapKV-style window scores. One-shot after prefill; the
+    paper's cascading prefill management is not reproduced."""
+
+    key, name, family, lever, bits = "cake", "CAKE", "Eviction", "context", 16
+
+    def __init__(self, budget=128, window=32, tau1=1.0, tau2=1.0):
+        self.budget, self.window = budget, window
+        self.tau1, self.tau2 = tau1, tau2
+        self._layer_budgets: list[int] | None = None
+
+    def _preference(self, attn) -> float:
+        window_attn = attn[:, :, -self.window:, :].mean(dim=(0, 1))
+        dist = window_attn.mean(dim=0)
+        dist = dist / dist.sum().clamp(min=1e-9)
+        dispersion = -(dist * dist.clamp(min=1e-9).log()).sum()
+        shift = window_attn.var(dim=0).mean()
+        return float((dispersion + 1e-6) ** (1 / self.tau1) * (shift + 1e-6) ** (1 / self.tau2))
+
+    def _allocate(self, preferences: list[float], lens: list[int]) -> list[int]:
+        n = len(lens)
+        total = min(self.budget * n, sum(lens))
+        floors = [min(self.window, length) for length in lens]
+        if sum(floors) >= total:
+            return [min(self.budget, length) for length in lens]
+        alloc = [float(f) for f in floors]
+        for _ in range(n):
+            remaining = total - sum(alloc)
+            if remaining <= 1e-9:
+                break
+            open_layers = [i for i in range(n) if alloc[i] < lens[i]]
+            if not open_layers:
+                break
+            weight_sum = sum(preferences[i] for i in open_layers)
+            for i in open_layers:
+                share = preferences[i] / weight_sum if weight_sum > 0 else 1 / len(open_layers)
+                alloc[i] = min(float(lens[i]), alloc[i] + remaining * share)
+        budgets = [int(a) for a in alloc]
+        by_remainder = sorted(range(n), key=lambda i: alloc[i] - budgets[i], reverse=True)
+        for i in by_remainder:
+            if sum(budgets) >= total:
+                break
+            if budgets[i] < lens[i]:
+                budgets[i] += 1
+        return budgets
+
+    def apply(self, past_key_values, attentions):
+        preferences = [self._preference(attn) for attn in attentions]
+        lens = [k.shape[2] for k, _ in past_key_values]
+        self._layer_budgets = self._allocate(preferences, lens)
+        out = []
+        for (k, v), attn, layer_budget in zip(past_key_values, attentions, self._layer_budgets):
+            scores = _key_scores(attn, k.shape[1], self.window)
+            out.append(_evict(k, v, scores, layer_budget, self.window))
+        return tuple(out)
+
+    def kept_len(self, orig_len):
+        return min(self.budget, orig_len)
+
+    def kv_bytes(self, orig_len: int, cfg: ModelConfig) -> float:
+        if self._layer_budgets is None:
+            return super().kv_bytes(orig_len, cfg)
+        per_layer_elem = 2 * cfg.n_kv_heads * cfg.head_dim
+        return per_layer_elem * (self.bits / 8.0) * sum(min(b, orig_len) for b in self._layer_budgets)
+
+
 class KIVIQuant(KVMethod):
     key, name, family, lever = "kivi", "KIVI", "Compression", "dtype"
 
@@ -169,7 +240,7 @@ class KIVIQuant(KVMethod):
         return per_elem * ((orig_len - r) * self.bits / 8.0 + r * 2.0)
 
 
-_IMPLEMENTED = {"full": FullCache, "h2o": H2O, "snapkv": SnapKV, "kivi": KIVIQuant}
+_IMPLEMENTED = {"full": FullCache, "h2o": H2O, "snapkv": SnapKV, "cake": CAKE, "kivi": KIVIQuant}
 
 
 def build(key: str, **kwargs) -> KVMethod:
