@@ -132,22 +132,25 @@ def run(method_specs, model_name="distilgpt2", text=SAMPLE_TEXT,
             f"got {len(attns)} attention tensors for {len(base_pkv)} cache layers; "
             "the model must run with attn_implementation='eager' to expose attentions")
 
+    def score_with(method):
+        pkv = method.apply(tuple((k.clone(), v.clone()) for k, v in base_pkv), attns)
+        with torch.no_grad():
+            return _score(model, cont_ids, pkv, start_pos=prefill)
+
+    # The uncompressed control is scored once, up front, so every row's delta is
+    # relative to it regardless of where (or whether) "full" appears in the specs.
+    baseline_ppl = score_with(build("full"))
+
     specs = [(s, {}) if isinstance(s, str) else s for s in method_specs]
-    rows, baseline_ppl = [], None
+    rows = []
     full_bytes = 2 * cfg.layers * cfg.n_kv_heads * cfg.head_dim * 2.0 * prefill
     for key, kw in specs:
         method = build(key, **{**derive_kwargs(key, prefill, ratio, recent, cfg), **kw})
         logger.info("method %s (%s, lever=%s)", method.name, method.family, method.lever)
-        pkv = tuple((k.clone(), v.clone()) for k, v in base_pkv)
-        pkv = method.apply(pkv, attns)
-        with torch.no_grad():
-            ppl = _score(model, cont_ids, pkv, start_pos=prefill)
-
+        ppl = baseline_ppl if key == "full" else score_with(method)
         kept = method.kept_len(prefill)
         kv_bytes = method.kv_bytes(prefill, cfg)
-        if key == "full":
-            baseline_ppl = ppl
-        delta = 0.0 if baseline_ppl is None else (ppl - baseline_ppl) / baseline_ppl * 100
+        delta = (ppl - baseline_ppl) / baseline_ppl * 100
         rows.append(Row(method.name, method.family, kept, method.bits,
                         kv_bytes / memory.MB, kv_bytes / full_bytes, ppl, delta))
     return rows, cfg
