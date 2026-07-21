@@ -99,9 +99,9 @@ def derive_kwargs(key: str, prefill: int, ratio: float, recent: int, cfg) -> dic
     token count; KIVI's bit width is picked by its true byte accounting, fp16
     residual included."""
     keep = 1.0 - ratio
-    if key in ("h2o", "snapkv", "cake"):
+    if key in ("h2o", "obcache", "snapkv", "cake"):
         budget = max(1, round(prefill * keep))
-        window = {"recent": recent} if key == "h2o" else {"window": recent}
+        window = {"recent": recent} if key in ("h2o", "obcache") else {"window": recent}
         return {"budget": budget, **window}
     if key == "kivi":
         from .methods import FullCache, KIVIQuant

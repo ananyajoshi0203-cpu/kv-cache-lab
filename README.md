@@ -75,9 +75,11 @@ kv-cache-lab/
     registry.py     methods by family and lever, mapped to KVPress presses
     scenarios.py    deployment scenarios and the methods that fit them
     backends.py     ReferenceBackend (in-repo) and KVPressBackend (NVIDIA KVPress)
-    methods.py      reference implementations of H2O, SnapKV, KIVI
+    methods.py      reference implementations of H2O, SnapKV, OBCache, CAKE, KIVI
+    decode.py       step-wise decode loop with a per-step method hook
     evals.py        standard benchmarks (RULER, LongBench, SCBench, IFEval)
-    benchmark.py    iso-budget runner with CSV/JSON output
+    needle.py       passkey retrieval eval, runnable on CPU
+    benchmark.py    iso-ratio runner with CSV/JSON output
     log.py          logging setup
   examples/         runnable entry points
   tests/            unit tests for the cost model and registry

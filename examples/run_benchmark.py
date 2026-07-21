@@ -29,7 +29,7 @@ def main():
     args = ap.parse_args()
     configure(verbose=args.verbose)
 
-    methods = ["full", "h2o", "snapkv", "cake", "kivi"]
+    methods = ["full", "h2o", "obcache", "snapkv", "cake", "kivi"]
     rows, cfg = benchmark.run(methods, model_name=args.model,
                               prefill=args.prefill, cont=args.cont, ratio=args.ratio)
     log.info("\n%s", benchmark.format_table(rows, cfg))

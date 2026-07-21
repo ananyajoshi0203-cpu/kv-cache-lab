@@ -21,7 +21,8 @@ log = get_logger("needle.cli")
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default="distilgpt2")
-    ap.add_argument("--method", default="snapkv", choices=["snapkv", "h2o", "kivi", "full"])
+    ap.add_argument("--method", default="snapkv",
+                    choices=["snapkv", "h2o", "obcache", "cake", "kivi", "full"])
     ap.add_argument("--ratios", default="0,0.5,0.75",
                     help="comma-separated fractions of cache bytes to remove")
     ap.add_argument("--n", type=int, default=8)

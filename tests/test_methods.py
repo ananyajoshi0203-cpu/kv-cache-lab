@@ -12,7 +12,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kvlab import memory                                            # noqa: E402
 from kvlab.methods import (                                         # noqa: E402
-    CAKE, H2O, FullCache, KIVIQuant, SnapKV, _evict, _fake_quant, _key_scores, build,
+    CAKE, H2O, FullCache, KIVIQuant, OBCache, SnapKV,
+    _evict, _fake_quant, _key_scores, build,
 )
 
 B, H, S, D = 1, 2, 24, 4
@@ -142,6 +143,26 @@ def test_cake_bytes_equal_flat_budget_when_layers_identical():
     method = CAKE(budget=BUDGET, window=RECENT)
     method.apply(pkv, attns)
     assert method.kv_bytes(S, cfg) == memory.cache_bytes(cfg, BUDGET, "fp16")
+
+
+def test_obcache_value_norm_breaks_attention_ties():
+    k, v = position_coded_kv()
+    big_value, small_value = 4, 5
+    v = torch.ones(B, H, S, D)
+    v[:, :, big_value] = 10.0
+    out = OBCache(budget=RECENT + 1, recent=RECENT).apply(((k, v),), (_uniform_attention(),))
+    (ok, _), = out
+    assert kept_positions(ok) >= {big_value} | set(range(S - RECENT, S))
+    assert small_value not in kept_positions(ok)
+
+
+def test_obcache_matches_h2o_when_value_norms_equal():
+    k, v = position_coded_kv()
+    v = torch.ones(B, H, S, D)
+    attn = torch.rand(B, H, S, S).softmax(dim=-1)
+    (ok_ob, _), = OBCache(budget=BUDGET, recent=RECENT).apply(((k.clone(), v.clone()),), (attn,))
+    (ok_h2o, _), = H2O(budget=BUDGET, recent=RECENT).apply(((k.clone(), v.clone()),), (attn,))
+    assert kept_positions(ok_ob) == kept_positions(ok_h2o)
 
 
 def test_kivi_residual_untouched():

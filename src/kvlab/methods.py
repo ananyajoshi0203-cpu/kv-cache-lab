@@ -146,6 +146,30 @@ class SnapKV(KVMethod):
         return min(self.budget, orig_len)
 
 
+class OBCache(KVMethod):
+    """Value-aware eviction (OBCache, arXiv:2510.07651) in first-order reference
+    form: saliency is accumulated attention mass weighted by the L2 norm of each
+    token's value vector, the diagonal term of the paper's output-perturbation
+    objective. Two tokens with equal attention differ in saliency when their
+    values differ in magnitude -- the signal attention-only scorers cannot see.
+    The Hessian-based correction is not reproduced."""
+
+    key, name, family, lever, bits = "obcache", "OBCache", "Eviction", "context", 16
+
+    def __init__(self, budget=128, recent=32):
+        self.budget, self.recent = budget, recent
+
+    def apply(self, past_key_values, attentions):
+        out = []
+        for (k, v), attn in zip(past_key_values, attentions):
+            scores = _key_scores(attn, k.shape[1]) * v.norm(dim=-1)
+            out.append(_evict(k, v, scores, self.budget, self.recent))
+        return tuple(out)
+
+    def kept_len(self, orig_len):
+        return min(self.budget, orig_len)
+
+
 class CAKE(KVMethod):
     """Layer-adaptive budget allocation (CAKE, arXiv:2503.12491) in reference
     form. Each layer's preference combines spatial dispersion (entropy of its
@@ -240,7 +264,8 @@ class KIVIQuant(KVMethod):
         return per_elem * ((orig_len - r) * self.bits / 8.0 + r * 2.0)
 
 
-_IMPLEMENTED = {"full": FullCache, "h2o": H2O, "snapkv": SnapKV, "cake": CAKE, "kivi": KIVIQuant}
+_IMPLEMENTED = {"full": FullCache, "h2o": H2O, "snapkv": SnapKV, "cake": CAKE,
+                "obcache": OBCache, "kivi": KIVIQuant}
 
 
 def build(key: str, **kwargs) -> KVMethod:
