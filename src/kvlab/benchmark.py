@@ -35,17 +35,45 @@ class Row:
     delta_pct: float
 
 
+# Non-repetitive on purpose: a repeated passage lets the model predict the
+# continuation from any surviving copy, which flattens perplexity and hides the
+# damage eviction does. Each paragraph covers distinct content so the score
+# depends on the specific tokens the cache retains.
 SAMPLE_TEXT = (
     "The key-value cache stores the key and value vectors of every past token so an "
     "autoregressive model never recomputes them. It makes generation fast, but grows "
     "linearly with context length. As windows stretch from thousands of tokens to "
     "millions, the cache outgrows a single accelerator and becomes the primary limit "
-    "on scalable inference. Responses fall into a few families: evicting unimportant "
-    "tokens, quantizing the stored numbers, offloading the cache to slower memory, and "
-    "redesigning attention so no per-token cache is needed. No single family wins "
-    "everywhere; the right choice depends on context length, hardware, and how much "
-    "accuracy the task can lose. "
-) * 6
+    "on scalable inference. "
+    "The arithmetic is unforgiving. A seven billion parameter model with thirty-two "
+    "layers and heads of dimension one hundred twenty-eight stores half a megabyte of "
+    "cache for each token it has seen. At a context of one hundred twenty-eight "
+    "thousand tokens that is sixty-four gigabytes, more than the largest widely "
+    "deployed accelerator can spare once weights and activations are resident. "
+    "Hardware trends make the squeeze worse rather than better. Compute has grown "
+    "faster than memory bandwidth for a decade, and bandwidth has grown faster than "
+    "capacity. Serving systems therefore hit the memory wall first: the accelerator "
+    "idles while tensors stream in from high-bandwidth memory, and batch sizes shrink "
+    "until utilization collapses. "
+    "One family of responses evicts tokens judged unimportant, betting that attention "
+    "is sparse enough for the model never to miss them. Another keeps every token but "
+    "quantizes the stored numbers down to four, two, or even fewer bits, trading "
+    "numerical precision for capacity. A third moves the cache to host memory or "
+    "disk and pages the working set back on demand, paying in bandwidth instead of "
+    "accuracy. The most radical line of work redesigns attention itself so that no "
+    "per-token state accumulates at all. "
+    "Evaluation is its own problem. Perplexity on held-out text barely moves under "
+    "aggressive compression, yet the same model may fail to retrieve a name buried "
+    "mid-document or silently ignore one instruction out of five. Benchmarks built "
+    "around retrieval depth, multi-turn reuse, and instruction following expose "
+    "failures that a single scalar score conceals. "
+    "Deployment settings pull the design space in different directions. A phone "
+    "assistant wants a tiny resident cache and tolerates approximation; a datacenter "
+    "serving thousands of concurrent sessions cares about throughput and cache "
+    "sharing; an agent reasoning over a repository for an hour needs its early "
+    "conclusions intact at the end. No single method wins everywhere, which is why "
+    "fair comparison at a matched budget matters more than any headline number."
+)
 
 
 def _score(model, cont_ids, past_key_values, start_pos):
