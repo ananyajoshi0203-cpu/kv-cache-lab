@@ -22,15 +22,15 @@ def main():
     ap.add_argument("--model", default="distilgpt2")
     ap.add_argument("--prefill", type=int, default=384)
     ap.add_argument("--cont", type=int, default=64)
-    ap.add_argument("--budget", type=int, default=96)
-    ap.add_argument("--bits", type=int, default=2)
+    ap.add_argument("--ratio", type=float, default=0.75,
+                    help="target fraction of cache bytes removed, applied to every method")
     ap.add_argument("--out", default="")
     ap.add_argument("--verbose", action="store_true")
     args = ap.parse_args()
     configure(verbose=args.verbose)
 
     rows, cfg = benchmark.run(["full", "h2o", "snapkv", "kivi"], model_name=args.model,
-                              prefill=args.prefill, cont=args.cont, budget=args.budget, bits=args.bits)
+                              prefill=args.prefill, cont=args.cont, ratio=args.ratio)
     log.info("\n%s", benchmark.format_table(rows, cfg))
     if args.out:
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
