@@ -25,9 +25,9 @@ away something that mattered.
 | HashEvict | Locality-sensitive hashing approximates importance *before* attention. | Decoding | 2412.16187 |
 | MorphKV | Constant-size cache; scores old tokens from recent patterns, no early bias. | Decoding | 2503.00979 |
 | RocketKV | Coarse SnapKV eviction, then fine-grained sparse attention over pages. | Decoding | 2502.14051 |
-| KVzip | Query-agnostic: keep tokens that best let the model *reconstruct* the context. Runnable via the KVPress backend; the strongest multi-turn baseline. | After-prefill | 2505.23416 |
-| **CAKE** ✅ | Per-layer budgets from attention dispersion + temporal shift; wraps a window scorer. | After-prefill | 2503.12491 |
-| **OBCache** ✅ | Value-aware saliency: attention mass × value norm (first-order output perturbation). | After-prefill | 2510.07651 |
+| KVzip | Query-agnostic: keep tokens that best let the model *reconstruct* the context. Runnable via the KVPress backend; a strong published multi-turn baseline. | After-prefill | 2505.23416 |
+| **CAKE-style** ✅ | Per-layer budgets from attention dispersion + temporal shift; wraps a window scorer. Cascading prefill management not reproduced. | After-prefill | 2503.12491 |
+| **OBCache 1st-order** ✅ | Value-aware saliency: attention mass × value norm. Hessian correction not reproduced. | After-prefill | 2510.07651 |
 | ReST-KV | Layer-wise output reconstruction + spatial-temporal smoothing. Deferred: OBCache covers the value-aware axis here. | After-prefill | 2605.08840 |
 | MomentKV | Closes the directional gap in eviction scoring for long context. | Decoding | 2606.01563 |
 | SABlock | Semantic-aware eviction with adaptive compression block size. | After-prefill | 2510.22556 |

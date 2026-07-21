@@ -174,7 +174,7 @@ class OBCache(KVMethod):
     values differ in magnitude -- the signal attention-only scorers cannot see.
     The Hessian-based correction is not reproduced."""
 
-    key, name, family, lever, bits = "obcache", "OBCache", "Eviction", "context", 16
+    key, name, family, lever, bits = "obcache", "OBCache 1st-order", "Eviction", "context", 16
 
     def __init__(self, budget=128, recent=32):
         self.budget, self.recent = budget, recent
@@ -197,9 +197,11 @@ class CAKE(KVMethod):
     (variance of that distribution across window queries); the global token
     budget -- `budget` per layer on average -- is split proportionally, then each
     layer evicts with SnapKV-style window scores. One-shot after prefill; the
-    paper's cascading prefill management is not reproduced."""
+    paper's cascading prefill management is not reproduced. The preference
+    statistics round-trip through Python floats, which forces device sync --
+    fine for this CPU reference, not for a production implementation."""
 
-    key, name, family, lever, bits = "cake", "CAKE", "Eviction", "context", 16
+    key, name, family, lever, bits = "cake", "CAKE-style", "Eviction", "context", 16
 
     def __init__(self, budget=128, window=32, pool=7, tau1=1.0, tau2=1.0):
         self.budget, self.window, self.pool = budget, window, pool
@@ -264,7 +266,13 @@ class CAKE(KVMethod):
 
 
 class KIVIQuant(KVMethod):
-    key, name, family, lever = "kivi", "KIVI", "Compression", "dtype"
+    """Fake-quantization reference of KIVI (arXiv:2402.02750): tensors are
+    quantized and immediately dequantized, so the *error* of 2-bit storage is
+    simulated while the tensors stay full-precision floats. kv_bytes reports the
+    analytical low-bit size, not allocated memory; real memory and latency
+    numbers require a genuine quantized-cache backend (KVPressQuantBackend)."""
+
+    key, name, family, lever = "kivi", "KIVI fake-quant", "Compression", "dtype"
 
     def __init__(self, bits=2, residual=16):
         self.bits = bits

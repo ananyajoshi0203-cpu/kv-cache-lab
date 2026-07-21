@@ -12,12 +12,15 @@ it: an analytical cost model, a taxonomy of the methods, and a comparison harnes
 that stands on established libraries and benchmarks rather than a bespoke one.
 
 The design goal is credibility. Method implementations come from NVIDIA
-[KVPress](https://github.com/NVIDIA/kvpress); accuracy is measured on the same
-long-context benchmarks the literature reports (RULER, LongBench, SCBench, IFEval);
-and every method is compared at a matched compression ratio so the numbers mean
-something. The repository also ships small reference implementations of a few methods
-so the mechanism is legible, but these are for understanding, not for headline
-numbers.
+[KVPress](https://github.com/NVIDIA/kvpress); accuracy is meant to come from the
+same long-context benchmarks the literature reports (RULER, LongBench, SCBench,
+IFEval), invoked through KVPress's evaluation CLI — this repository catalogs and
+wires those suites but has not yet produced published result artifacts. Every
+method is compared at a matched compression ratio so the numbers mean something.
+The repository also ships small reference implementations of a few methods so the
+mechanism is legible, but these are for understanding, not for headline numbers:
+where a reference simplifies its paper, the class docstring and registry entry
+say exactly what is omitted.
 
 ## The cost model
 
@@ -29,10 +32,12 @@ bytes_per_token = 2 · layers · kv_heads · head_dim · dtype_bytes
 total_cache     = bytes_per_token · context_length · batch
 ```
 
-For a 7B model (32 layers, 32 heads, head_dim 128, fp16) this is 0.5 MB per token,
-so a 128K context needs 64 GB of cache, which alone exceeds an 80 GB A100 once
-weights and activations are resident. On a 24 GB card the cache fills near 48K
-tokens. `kvlab.memory` computes these figures with no dependencies, and
+For an MHA 7B configuration like Llama-2-7B (32 layers, 32 KV heads, head_dim 128,
+fp16) this is 0.5 MB per token, so a 128K context needs 64 GB of cache, which alone
+exceeds an 80 GB A100 once weights and activations are resident. On a 24 GB card
+the cache fills near 48K tokens. GQA models divide this by their grouping factor:
+Llama-3.1-8B keeps 8 KV heads instead of 32, so 0.125 MB per token and 16 GB at
+128K. `kvlab.memory` computes these figures with no dependencies, and
 `examples/run_memory_demo.py` reproduces them.
 
 Every optimization reduces one term of that equation. This gives a clean way to
@@ -139,12 +144,20 @@ in `kvlab.evals`; `evals.kvpress_eval_hint()` prints the invocation.
 ## Status
 
 Runnable now: the cost model, the registry and scenario map, and five reference
-methods on a small CPU model — H2O (one-shot and true online decoding via the
-step hook), SnapKV, OBCache (value-aware scoring), CAKE (layer-adaptive budgets,
-supported by exact ragged-cache mask fitting), and KIVI — plus the iso-ratio
+methods on a small CPU model — H2O (one-shot, plus online heavy-hitter decoding
+via the step hook; not parity-tested against the authors' code), SnapKV (with the
+paper's pooling step), OBCache in first-order form (value-aware scoring), a
+CAKE-style layer allocator (supported by ragged-cache mask fitting, whose
+correctness is pinned by logit-equivalence tests on a RoPE model), and KIVI as a
+fake-quant reference (simulated error, analytical sizes) — plus the iso-ratio
 perplexity benchmark and the passkey retrieval eval. The harness runs on
 transformers 5. Wired and ready for a GPU host: the KVPress backend (including
-KVzip, the strongest multi-turn baseline) and the benchmark catalog.
+KVzip, a strong published multi-turn baseline) and the benchmark catalog.
+
+The iso-ratio accounting covers retained KV storage. Scorer side-state (H2O's
+accumulated statistics, quantization scales) is not yet counted; it is negligible
+for the current methods but must be counted for any method that keeps per-chunk
+metadata.
 
 Trained eviction methods (LookaheadKV, ForesightKV) are catalogued with their
 published numbers rather than reimplemented, and hybrid-memory and

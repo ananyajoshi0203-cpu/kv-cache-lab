@@ -58,14 +58,14 @@ REGISTRY: list[Method] = [
            "arXiv:2502.14051", "Decoding"),
     Method("kvzip", "KVzip", "Eviction", "context", "planned",
            "Query-agnostic eviction that keeps tokens best able to reconstruct the context. "
-           "Runnable today through the KVPress backend; the strongest multi-turn baseline.",
+           "Runnable today through the KVPress backend; a strong published multi-turn baseline.",
            "arXiv:2505.23416", "After-prefill", "KVzipPress"),
-    Method("cake", "CAKE", "Eviction", "context", "implemented",
+    Method("cake", "CAKE-style", "Eviction", "context", "implemented",
            "Per-layer budgets from attention dispersion and temporal shift, wrapping a window "
            "scorer. Reference form is one-shot after prefill; the paper's cascading prefill "
            "management is not reproduced.",
            "arXiv:2503.12491", "After-prefill"),
-    Method("obcache", "OBCache", "Eviction", "context", "implemented",
+    Method("obcache", "OBCache 1st-order", "Eviction", "context", "implemented",
            "Value-aware saliency: accumulated attention weighted by value-vector norms, the "
            "first-order term of the paper's output-perturbation objective (Hessian correction "
            "not reproduced).",
@@ -97,8 +97,9 @@ REGISTRY: list[Method] = [
            "arXiv:2606.17872", "After-prefill"),
 
     # Compression
-    Method("kivi", "KIVI", "Compression", "dtype", "implemented",
-           "2-bit KV quantization: per-channel for keys, per-token for values.",
+    Method("kivi", "KIVI fake-quant", "Compression", "dtype", "implemented",
+           "2-bit KV quantization: per-channel for keys, per-token for values. Reference "
+           "simulates the quantization error in float tensors; sizes are analytical.",
            "arXiv:2402.02750", "Decoding"),
     Method("kvquant", "KVQuant", "Compression", "dtype", "planned",
            "Ultra-low-bit with pre-RoPE, non-uniform levels, and outlier preservation.",
