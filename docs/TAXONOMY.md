@@ -25,7 +25,21 @@ away something that mattered.
 | HashEvict | Locality-sensitive hashing approximates importance *before* attention. | Decoding | 2412.16187 |
 | MorphKV | Constant-size cache; scores old tokens from recent patterns, no early bias. | Decoding | 2503.00979 |
 | RocketKV | Coarse SnapKV eviction, then fine-grained sparse attention over pages. | Decoding | 2502.14051 |
-| KVzip | Query-agnostic: keep tokens that best let the model *reconstruct* the context. | After-prefill | 2505.23416 |
+| KVzip | Query-agnostic: keep tokens that best let the model *reconstruct* the context. Runnable via the KVPress backend; the strongest multi-turn baseline. | After-prefill | 2505.23416 |
+| **CAKE** ✅ | Per-layer budgets from attention dispersion + temporal shift; wraps a window scorer. | After-prefill | 2503.12491 |
+| **OBCache** ✅ | Value-aware saliency: attention mass × value norm (first-order output perturbation). | After-prefill | 2510.07651 |
+| ReST-KV | Layer-wise output reconstruction + spatial-temporal smoothing. Deferred: OBCache covers the value-aware axis here. | After-prefill | 2605.08840 |
+| MomentKV | Closes the directional gap in eviction scoring for long context. | Decoding | 2606.01563 |
+| SABlock | Semantic-aware eviction with adaptive compression block size. | After-prefill | 2510.22556 |
+| InfoKV | Information-aware compression preserving tokens needed for long reasoning. | Decoding | 2606.26875 |
+
+**Cited, not run.** Two lines of 2026 work are catalogued but deliberately not
+reimplemented. LookaheadKV (2603.10899) and ForesightKV (2602.03203) predict
+*future* token importance with trained components (lookahead tokens/LoRA, a
+learned contribution model); reproducing them training-free is impossible, so
+they enter comparisons through their published numbers only. AnchorKV
+(2606.17872) optimizes a safety objective (refusal preservation), which is
+orthogonal to the accuracy-per-byte axis this lab compares on.
 
 **Watch out (pitfalls paper):** plain eviction permanently deletes tokens, so
 it's a poor fit for multi-turn chat — a later turn may need what you dropped.
@@ -85,15 +99,23 @@ Combine eviction + compression + offloading.
 
 The natural progression of this lab, roughly in order of effort:
 
-1. **More eviction/compression methods** — Ada-KV, MorphKV, KVQuant, PALU. All
-   fit the CPU harness today. Great first contributions.
-2. **A better quality metric than perplexity** — a needle-in-a-haystack retrieval
-   task and a **multi-instruction eval (IFEval-style)**. This is where the
-   *pitfalls* paper lives: show that a method with "fine" perplexity still drops
-   specific instructions. This is the experiment worth writing up.
-3. **Real long-context on GPU** — swap distilgpt2 for Llama-3-8B / Qwen2.5-14B,
-   measure at 32K–128K, and reproduce headline memory/throughput claims.
-4. **A hybrid-memory demo** — even a toy PagedAttention (paged block table over
+1. **More eviction/compression methods** — Ada-KV (per-head budgets now
+   expressible via the ragged-cache mask fitting that CAKE uses), MorphKV
+   (decode-phase, fits the `method.step()` hook), KVQuant, PALU. Great first
+   contributions.
+2. **A better quality metric than perplexity** — the needle retrieval eval now
+   ships (`kvlab.needle`); still open is a **multi-instruction eval
+   (IFEval-style)**. This is where the *pitfalls* paper lives: show that a
+   method with "fine" perplexity still drops specific instructions. This is the
+   experiment worth writing up.
+3. **A multi-turn runner (SCBench-style)** — compress after turn one, reuse the
+   cache across later turns, measure degradation per turn. This is where
+   eviction methods actually diverge, and no in-repo eval exercises it yet.
+4. **Real long-context on GPU** — swap distilgpt2 for Llama-3-8B / Qwen2.5-14B,
+   measure at 32K–128K, and reproduce headline memory/throughput claims. Toy
+   scale cannot separate refinements within a scoring family (CAKE vs SnapKV,
+   OBCache vs H2O land within a few points of their bases at 384 tokens).
+5. **A hybrid-memory demo** — even a toy PagedAttention (paged block table over
    the cache) makes the "lossless, moves not shrinks" idea concrete.
 
 The through-line for a workshop paper: *benchmarks say compression is free;

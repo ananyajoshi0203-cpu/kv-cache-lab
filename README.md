@@ -99,11 +99,19 @@ python examples/run_memory_demo.py
 ```
 
 The reference benchmark runs a small model on CPU and reports memory saved against
-perplexity cost:
+perplexity cost, every method at the same target compression ratio:
 
 ```bash
 pip install torch transformers
-python examples/run_benchmark.py --out results/reference
+python examples/run_benchmark.py --ratio 0.75 --out results/reference
+```
+
+Perplexity understates eviction damage, so a passkey-retrieval eval closes the
+loop from method to an accuracy number (the ratio 0.0 row is the uncompressed
+control):
+
+```bash
+python examples/run_needle.py --method snapkv --ratios 0,0.5,0.75
 ```
 
 For real long-context methods, use KVPress through the same interface:
@@ -130,11 +138,21 @@ in `kvlab.evals`; `evals.kvpress_eval_hint()` prints the invocation.
 
 ## Status
 
-Runnable now: the cost model, the registry and scenario map, and the reference
-methods on a small CPU model. Wired and ready for a GPU host: the KVPress backend and
-the benchmark catalog. Hybrid-memory and alternative-attention methods are documented
-rather than reimplemented, since they belong to serving engines (vLLM) or require
-retraining. `docs/TAXONOMY.md` records the full map and the intended next steps.
+Runnable now: the cost model, the registry and scenario map, and five reference
+methods on a small CPU model — H2O (one-shot and true online decoding via the
+step hook), SnapKV, OBCache (value-aware scoring), CAKE (layer-adaptive budgets,
+supported by exact ragged-cache mask fitting), and KIVI — plus the iso-ratio
+perplexity benchmark and the passkey retrieval eval. The harness runs on
+transformers 5. Wired and ready for a GPU host: the KVPress backend (including
+KVzip, the strongest multi-turn baseline) and the benchmark catalog.
+
+Trained eviction methods (LookaheadKV, ForesightKV) are catalogued with their
+published numbers rather than reimplemented, and hybrid-memory and
+alternative-attention methods are documented rather than reimplemented, since
+they belong to serving engines (vLLM) or require retraining. `docs/TAXONOMY.md`
+records the full map and the intended next steps; note that refinements within
+a scoring family only separate at real context lengths, so toy-scale numbers
+compare families, not papers.
 
 ## References
 
