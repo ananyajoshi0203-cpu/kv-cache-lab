@@ -77,16 +77,21 @@ SAMPLE_TEXT = (
 )
 
 
-def _score(model, cont_ids, past_key_values, start_pos):
+def _score(model, input_ids, target_ids, past_key_values, start_pos):
+    """Perplexity of target_ids, where input_ids is target_ids shifted one token
+    left (starting at the final cached-prompt token). Every prediction in the
+    forward pass lines up with a target, so all continuation tokens are scored --
+    including the first one, whose prediction depends most directly on the
+    compressed cache."""
     import torch
     from .model import per_layer_mask_fit, tuples_to_cache
-    pos = torch.arange(start_pos, start_pos + cont_ids.shape[1], device=cont_ids.device).unsqueeze(0)
+    pos = torch.arange(start_pos, start_pos + input_ids.shape[1], device=input_ids.device).unsqueeze(0)
     key_lens = [k.shape[2] for k, _ in past_key_values]
     with per_layer_mask_fit(model, key_lens):
-        out = model(input_ids=cont_ids, past_key_values=tuples_to_cache(past_key_values),
+        out = model(input_ids=input_ids, past_key_values=tuples_to_cache(past_key_values),
                     position_ids=pos, use_cache=False)
-    logits, targets = out.logits[:, :-1, :], cont_ids[:, 1:]
-    nll = torch.nn.functional.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+    nll = torch.nn.functional.cross_entropy(
+        out.logits.reshape(-1, out.logits.size(-1)), target_ids.reshape(-1))
     return float(math.exp(nll.item()))
 
 
@@ -121,8 +126,14 @@ def run(method_specs, model_name="distilgpt2", text=SAMPLE_TEXT,
     logger.info("model %s: layers=%d kv_heads=%d head_dim=%d", cfg.name, cfg.layers, cfg.n_kv_heads, cfg.head_dim)
 
     ids = tok(text, return_tensors="pt").input_ids
-    prefill = min(prefill, ids.shape[1] - cont - 1)
-    prefill_ids, cont_ids = ids[:, :prefill], ids[:, prefill: prefill + cont]
+    prefill = min(prefill, ids.shape[1] - cont)
+    # The cache holds the prompt minus its final token; that token leads the
+    # scoring input instead, so its forward pass runs against the compressed
+    # cache and the first continuation token gets scored like every other.
+    cache_len = prefill - 1
+    prefill_ids = ids[:, :cache_len]
+    score_ids = ids[:, cache_len: cache_len + cont]
+    target_ids = ids[:, prefill: prefill + cont]
 
     with torch.no_grad():
         base = model(prefill_ids, use_cache=True, output_attentions=True)
@@ -135,7 +146,7 @@ def run(method_specs, model_name="distilgpt2", text=SAMPLE_TEXT,
     def score_with(method):
         pkv = method.apply(tuple((k.clone(), v.clone()) for k, v in base_pkv), attns)
         with torch.no_grad():
-            return _score(model, cont_ids, pkv, start_pos=prefill)
+            return _score(model, score_ids, target_ids, pkv, start_pos=cache_len)
 
     # The uncompressed control is scored once, up front, so every row's delta is
     # relative to it regardless of where (or whether) "full" appears in the specs.
@@ -143,13 +154,13 @@ def run(method_specs, model_name="distilgpt2", text=SAMPLE_TEXT,
 
     specs = [(s, {}) if isinstance(s, str) else s for s in method_specs]
     rows = []
-    full_bytes = 2 * cfg.layers * cfg.n_kv_heads * cfg.head_dim * 2.0 * prefill
+    full_bytes = 2 * cfg.layers * cfg.n_kv_heads * cfg.head_dim * 2.0 * cache_len
     for key, kw in specs:
-        method = build(key, **{**derive_kwargs(key, prefill, ratio, recent, cfg), **kw})
+        method = build(key, **{**derive_kwargs(key, cache_len, ratio, recent, cfg), **kw})
         logger.info("method %s (%s, lever=%s)", method.name, method.family, method.lever)
         ppl = baseline_ppl if key == "full" else score_with(method)
-        kept = method.kept_len(prefill)
-        kv_bytes = method.kv_bytes(prefill, cfg)
+        kept = method.kept_len(cache_len)
+        kv_bytes = method.kv_bytes(cache_len, cfg)
         delta = (ppl - baseline_ppl) / baseline_ppl * 100
         rows.append(Row(method.name, method.family, kept, method.bits,
                         kv_bytes / memory.MB, kv_bytes / full_bytes, ppl, delta))
