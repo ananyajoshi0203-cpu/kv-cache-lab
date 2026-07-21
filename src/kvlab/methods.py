@@ -21,6 +21,12 @@ class KVMethod:
     def apply(self, past_key_values, attentions):
         raise NotImplementedError
 
+    def step(self, past_key_values, attentions):
+        """Called after each decode step with the grown cache and that step's
+        attentions. Prefill-only methods leave the cache alone; decoding-phase
+        methods (online H2O, MorphKV) evict here."""
+        return past_key_values
+
     def kept_len(self, orig_len: int) -> int:
         return orig_len
 
@@ -42,17 +48,28 @@ def _key_scores(attn, n_kv_heads, window=None):
     return scores
 
 
-def _evict(key, value, scores, budget, recent):
-    B, H, S, D = key.shape
+def _evict_indices(scores, budget, recent):
+    """Kept-token indices [batch, heads, budget] in original order, or None when
+    the sequence already fits the budget."""
+    B, H, S = scores.shape
     if S <= budget:
-        return key, value
+        return None
     recent = min(recent, budget)
     heavy = min(budget - recent, S - recent)
-    idx_recent = torch.arange(S - recent, S, device=key.device).view(1, 1, recent).expand(B, H, recent)
+    idx_recent = torch.arange(S - recent, S, device=scores.device).view(1, 1, recent).expand(B, H, recent)
     _, idx_heavy = scores[..., : S - recent].topk(heavy, dim=-1)
-    idx = torch.cat([idx_heavy, idx_recent], dim=-1).sort(dim=-1).values
-    gather = idx.unsqueeze(-1).expand(B, H, idx.shape[-1], D)
-    return key.gather(2, gather), value.gather(2, gather)
+    return torch.cat([idx_heavy, idx_recent], dim=-1).sort(dim=-1).values
+
+
+def _gather_tokens(tensor, idx):
+    return tensor.gather(2, idx.unsqueeze(-1).expand(*idx.shape, tensor.shape[-1]))
+
+
+def _evict(key, value, scores, budget, recent):
+    idx = _evict_indices(scores, budget, recent)
+    if idx is None:
+        return key, value
+    return _gather_tokens(key, idx), _gather_tokens(value, idx)
 
 
 def _fake_quant(x, bits, reduce_dim):
@@ -74,14 +91,42 @@ class FullCache(KVMethod):
 
 
 class H2O(KVMethod):
+    """One-shot eviction after prefill, then true online H2O during decoding:
+    attention scores accumulate across steps (surviving the evictions that
+    reshape the cache) and each step evicts back down to the budget."""
+
     key, name, family, lever, bits = "h2o", "H2O", "Eviction", "context", 16
 
     def __init__(self, budget=128, recent=32):
         self.budget, self.recent = budget, recent
+        self._acc: list | None = None
+
+    def _evict_layer(self, k, v, scores):
+        idx = _evict_indices(scores, self.budget, self.recent)
+        if idx is None:
+            return (k, v), scores
+        return (_gather_tokens(k, idx), _gather_tokens(v, idx)), scores.gather(-1, idx)
 
     def apply(self, past_key_values, attentions):
-        return tuple(_evict(k, v, _key_scores(attn, k.shape[1]), self.budget, self.recent)
-                     for (k, v), attn in zip(past_key_values, attentions))
+        out, self._acc = [], []
+        for (k, v), attn in zip(past_key_values, attentions):
+            kv, acc = self._evict_layer(k, v, _key_scores(attn, k.shape[1]))
+            out.append(kv)
+            self._acc.append(acc)
+        return tuple(out)
+
+    def step(self, past_key_values, attentions):
+        out, acc_next = [], []
+        for i, ((k, v), attn) in enumerate(zip(past_key_values, attentions)):
+            scores = _key_scores(attn, k.shape[1])
+            if self._acc is not None:
+                prev = self._acc[i]
+                scores[..., : prev.shape[-1]] += prev
+            kv, acc = self._evict_layer(k, v, scores)
+            out.append(kv)
+            acc_next.append(acc)
+        self._acc = acc_next
+        return tuple(out)
 
     def kept_len(self, orig_len):
         return min(self.budget, orig_len)

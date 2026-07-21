@@ -67,21 +67,19 @@ class ReferenceBackend:
     """The in-repo reference methods on a small model. Runs on CPU; for learning
     and for checking that a press behaves as expected before scaling up."""
 
-    def __init__(self, model="distilgpt2", device="cpu"):
+    def __init__(self, model="distilgpt2", device="cpu", method_key="snapkv"):
         from .model import load_model
+        self.method_key = method_key
         self.model, self.tok, self.cfg = load_model(model, device)
 
     def generate(self, context: str, question: str = "", ratio: float = 0.5, max_new_tokens=64) -> str:
-        import torch
+        from .benchmark import derive_kwargs
+        from .decode import generate_stepwise
         from .methods import build
 
         ids = self.tok(context + question, return_tensors="pt").input_ids
-        with torch.no_grad():
-            out = self.model(ids, use_cache=True, output_attentions=True)
-        budget = max(1, int(ids.shape[1] * (1 - ratio)))
-        method = build("snapkv", budget=budget)
-        pkv = method.apply(out.past_key_values, out.attentions)
-        with torch.no_grad():
-            gen = self.model.generate(ids, past_key_values=pkv, max_new_tokens=max_new_tokens,
-                                      do_sample=False)
-        return self.tok.decode(gen[0, ids.shape[1]:], skip_special_tokens=True)
+        method = build(self.method_key,
+                       **derive_kwargs(self.method_key, ids.shape[1], ratio, recent=32, cfg=self.cfg))
+        gen = generate_stepwise(self.model, ids, method, max_new_tokens=max_new_tokens,
+                                eos_token_id=self.tok.eos_token_id)
+        return self.tok.decode(gen[0], skip_special_tokens=True)
