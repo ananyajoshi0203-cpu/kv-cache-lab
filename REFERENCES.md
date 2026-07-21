@@ -4,6 +4,9 @@
 - KV Cache Optimization Strategies for Scalable and Efficient LLM Inference. arXiv:2603.20397.
 - The Pitfalls of KV Cache Compression. Chen et al. ACL 2026. arXiv:2510.00231.
 - SCBench: A KV Cache-Centric Analysis of Long-Context Methods. ICLR 2025. arXiv:2412.10319.
+- Towards Efficient LLM Serving: A Survey on System-Aware KV Cache Optimization. ACL 2026.
+  https://github.com/jjiantong/Awesome-KV-Cache-Optimization
+- Rethinking KV Cache Eviction via a Unified Information-Theoretic Objective. arXiv:2604.25975.
 
 ## Libraries and tooling
 - NVIDIA KVPress. https://github.com/NVIDIA/kvpress
@@ -29,6 +32,15 @@
 - MorphKV. arXiv:2503.00979.
 - RocketKV. arXiv:2502.14051.
 - KVzip. arXiv:2505.23416.
+- CAKE: Cascading and Adaptive KV Cache Eviction with Layer Preferences. arXiv:2503.12491.
+- OBCache: Optimal Brain KV Cache Pruning. arXiv:2510.07651.
+- SABlock: Semantic-Aware Eviction with Adaptive Block Size. arXiv:2510.22556.
+- ForesightKV: Learning Long-Term Contribution for Reasoning Models. arXiv:2602.03203.
+- LookaheadKV: Eviction by Glimpsing into the Future without Generation. arXiv:2603.10899.
+- ReST-KV: Layer-wise Output Reconstruction with Spatial-Temporal Smoothing. arXiv:2605.08840.
+- MomentKV: Closing the Directional Gap in KV Cache Eviction. arXiv:2606.01563.
+- InfoKV: Information-Aware Compression for Long Reasoning. arXiv:2606.26875.
+- AnchorKV: Safety-Aware Compression via Soft Penalty with a Refusal Anchor. arXiv:2606.17872.
 
 ### Compression
 - KIVI. arXiv:2402.02750.

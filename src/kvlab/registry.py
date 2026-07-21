@@ -57,8 +57,44 @@ REGISTRY: list[Method] = [
            "Coarse eviction followed by fine-grained sparse attention over paged tokens.",
            "arXiv:2502.14051", "Decoding"),
     Method("kvzip", "KVzip", "Eviction", "context", "planned",
-           "Query-agnostic eviction that keeps tokens best able to reconstruct the context.",
+           "Query-agnostic eviction that keeps tokens best able to reconstruct the context. "
+           "Runnable today through the KVPress backend; the strongest multi-turn baseline.",
            "arXiv:2505.23416", "After-prefill", "KVzipPress"),
+    Method("cake", "CAKE", "Eviction", "context", "implemented",
+           "Per-layer budgets from attention dispersion and temporal shift, wrapping a window "
+           "scorer. Reference form is one-shot after prefill; the paper's cascading prefill "
+           "management is not reproduced.",
+           "arXiv:2503.12491", "After-prefill"),
+    Method("obcache", "OBCache", "Eviction", "context", "implemented",
+           "Value-aware saliency: accumulated attention weighted by value-vector norms, the "
+           "first-order term of the paper's output-perturbation objective (Hessian correction "
+           "not reproduced).",
+           "arXiv:2510.07651", "After-prefill"),
+    Method("rest-kv", "ReST-KV", "Eviction", "context", "planned",
+           "Layer-wise output reconstruction with spatial-temporal smoothing. Deferred: OBCache "
+           "already covers the value-aware scoring axis here.",
+           "arXiv:2605.08840", "After-prefill"),
+    Method("momentkv", "MomentKV", "Eviction", "context", "planned",
+           "Closes the directional gap in eviction scoring for long-context inference.",
+           "arXiv:2606.01563", "Decoding"),
+    Method("sablock", "SABlock", "Eviction", "context", "planned",
+           "Semantic-aware eviction with adaptive compression block size.",
+           "arXiv:2510.22556", "After-prefill"),
+    Method("infokv", "InfoKV", "Eviction", "context", "planned",
+           "Information-aware compression that preserves tokens needed for long reasoning.",
+           "arXiv:2606.26875", "Decoding"),
+    Method("lookaheadkv", "LookaheadKV", "Eviction", "context", "conceptual",
+           "Trained lookahead tokens and LoRA predict future importance without generating. "
+           "Needs training, so it is cited with published numbers, not reimplemented.",
+           "arXiv:2603.10899", "After-prefill"),
+    Method("foresightkv", "ForesightKV", "Eviction", "context", "conceptual",
+           "Learns each KV pair's long-term contribution for reasoning models. Needs training, "
+           "so it is cited with published numbers, not reimplemented.",
+           "arXiv:2602.03203", "Decoding"),
+    Method("anchorkv", "AnchorKV", "Eviction", "context", "conceptual",
+           "Safety-aware compression via a soft penalty around a refusal anchor. Orthogonal to "
+           "the accuracy axis compared here, so catalogued only.",
+           "arXiv:2606.17872", "After-prefill"),
 
     # Compression
     Method("kivi", "KIVI", "Compression", "dtype", "implemented",
