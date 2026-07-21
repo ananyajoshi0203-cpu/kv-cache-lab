@@ -86,7 +86,7 @@ def run(method_specs, model_name="distilgpt2", text=SAMPLE_TEXT,
             ppl = _score(model, cont_ids, pkv, start_pos=prefill)
 
         kept = method.kept_len(prefill)
-        kv_bytes = 2 * cfg.layers * cfg.n_kv_heads * cfg.head_dim * (method.bits / 8.0) * kept
+        kv_bytes = method.kv_bytes(prefill, cfg)
         if key == "full":
             baseline_ppl = ppl
         delta = 0.0 if baseline_ppl is None else (ppl - baseline_ppl) / baseline_ppl * 100

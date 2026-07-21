@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import torch
 
+from .memory import ModelConfig
+
 
 class KVMethod:
     key = "base"
@@ -21,6 +23,13 @@ class KVMethod:
 
     def kept_len(self, orig_len: int) -> int:
         return orig_len
+
+    def kv_bytes(self, orig_len: int, cfg: ModelConfig) -> float:
+        """Cache size after this method, in bytes. The default assumes every kept
+        token is stored uniformly at `self.bits`; methods with mixed precision
+        (e.g. a full-precision residual window) must override."""
+        per_elem = 2 * cfg.layers * cfg.n_kv_heads * cfg.head_dim
+        return per_elem * (self.bits / 8.0) * self.kept_len(orig_len)
 
 
 def _key_scores(attn, n_kv_heads, window=None):
@@ -108,6 +117,11 @@ class KIVIQuant(KVMethod):
             vq = torch.cat([_fake_quant(v[:, :, : S - r], self.bits, 3), v[:, :, S - r:]], dim=2)
             out.append((kq, vq))
         return tuple(out)
+
+    def kv_bytes(self, orig_len: int, cfg: ModelConfig) -> float:
+        per_elem = 2 * cfg.layers * cfg.n_kv_heads * cfg.head_dim
+        r = min(self.residual, orig_len)
+        return per_elem * ((orig_len - r) * self.bits / 8.0 + r * 2.0)
 
 
 _IMPLEMENTED = {"full": FullCache, "h2o": H2O, "snapkv": SnapKV, "kivi": KIVIQuant}
