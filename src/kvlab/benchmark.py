@@ -50,8 +50,10 @@ SAMPLE_TEXT = (
 
 def _score(model, cont_ids, past_key_values, start_pos):
     import torch
+    from .model import tuples_to_cache
     pos = torch.arange(start_pos, start_pos + cont_ids.shape[1], device=cont_ids.device).unsqueeze(0)
-    out = model(input_ids=cont_ids, past_key_values=past_key_values, position_ids=pos, use_cache=False)
+    out = model(input_ids=cont_ids, past_key_values=tuples_to_cache(past_key_values),
+                position_ids=pos, use_cache=False)
     logits, targets = out.logits[:, :-1, :], cont_ids[:, 1:]
     nll = torch.nn.functional.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
     return float(math.exp(nll.item()))
@@ -82,7 +84,7 @@ def derive_kwargs(key: str, prefill: int, ratio: float, recent: int, cfg) -> dic
 def run(method_specs, model_name="distilgpt2", text=SAMPLE_TEXT,
         prefill=384, cont=64, ratio=0.75, recent=32):
     import torch
-    from .model import load_model
+    from .model import cache_to_tuples, load_model
 
     model, tok, cfg = load_model(model_name)
     logger.info("model %s: layers=%d kv_heads=%d head_dim=%d", cfg.name, cfg.layers, cfg.n_kv_heads, cfg.head_dim)
@@ -93,7 +95,11 @@ def run(method_specs, model_name="distilgpt2", text=SAMPLE_TEXT,
 
     with torch.no_grad():
         base = model(prefill_ids, use_cache=True, output_attentions=True)
-    base_pkv, attns = base.past_key_values, base.attentions
+    base_pkv, attns = cache_to_tuples(base.past_key_values), base.attentions
+    if len(attns) != len(base_pkv):
+        raise RuntimeError(
+            f"got {len(attns)} attention tensors for {len(base_pkv)} cache layers; "
+            "the model must run with attn_implementation='eager' to expose attentions")
 
     specs = [(s, {}) if isinstance(s, str) else s for s in method_specs]
     rows, baseline_ppl = [], None
