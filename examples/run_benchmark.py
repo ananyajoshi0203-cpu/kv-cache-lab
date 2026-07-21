@@ -29,12 +29,19 @@ def main():
     args = ap.parse_args()
     configure(verbose=args.verbose)
 
-    rows, cfg = benchmark.run(["full", "h2o", "snapkv", "kivi"], model_name=args.model,
+    methods = ["full", "h2o", "snapkv", "kivi"]
+    rows, cfg = benchmark.run(methods, model_name=args.model,
                               prefill=args.prefill, cont=args.cont, ratio=args.ratio)
     log.info("\n%s", benchmark.format_table(rows, cfg))
     if args.out:
+        import torch
+        import transformers
+        config = {"model": cfg.name, "layers": cfg.layers, "kv_heads": cfg.n_kv_heads,
+                  "head_dim": cfg.head_dim, "prefill": args.prefill, "cont": args.cont,
+                  "ratio": args.ratio, "methods": methods,
+                  "torch": torch.__version__, "transformers": transformers.__version__}
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
-        benchmark.write_results(rows, args.out)
+        benchmark.write_results(rows, args.out, config)
         log.info("wrote %s.csv and %s.json", args.out, args.out)
 
 

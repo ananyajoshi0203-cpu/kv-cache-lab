@@ -15,6 +15,7 @@ import csv
 import json
 import logging
 import math
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 
 from . import memory
@@ -160,10 +161,13 @@ def format_table(rows, cfg) -> str:
     return "\n".join(lines)
 
 
-def write_results(rows, path_stem):
+def write_results(rows, path_stem, config: Mapping[str, object] | None = None):
+    """CSV holds the rows for spreadsheet use; JSON embeds the run configuration
+    so a results file identifies the model, ratio, and library versions that
+    produced it."""
     with open(f"{path_stem}.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=[f.name for f in Row.__dataclass_fields__.values()])
         w.writeheader()
         w.writerows(asdict(r) for r in rows)
     with open(f"{path_stem}.json", "w") as f:
-        json.dump([asdict(r) for r in rows], f, indent=2)
+        json.dump({"config": dict(config or {}), "rows": [asdict(r) for r in rows]}, f, indent=2)
