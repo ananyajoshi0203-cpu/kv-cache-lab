@@ -27,9 +27,10 @@ RETAINED = 130.0
 def row(*, method_key, metric, seed=0, example=0, task="multistep", redundancy="low",
         generation_length=GENERATION, retained_fraction=0.5, total_retained=RETAINED,
         generated_retained=10.0, generated_position_mean=150.0, compression_ratio=0.5,
-        eviction_seed=None):
+        eviction_seed=None, ablated_targeted=0, ablated_other=0):
     names = {"full": "Full cache", "random": "Prompt-protected random", "h2o": "H2O",
-             "snapkv": "SnapKV"}
+             "snapkv": "SnapKV", "ablate-numeric": "Trace ablation (numeric first)",
+             "ablate-other": "Trace ablation (other first)"}
     if eviction_seed is None:
         eviction_seed = 0 if method_key == "random" else analysis.NO_EVICTION_SEED
     return BoundaryRow(
@@ -43,7 +44,8 @@ def row(*, method_key, metric, seed=0, example=0, task="multistep", redundancy="
         total_budget=130, generation_budget=10, nominal_budget=130, window=32,
         prompt_retained=total_retained - generated_retained,
         generated_retained=generated_retained, total_retained=total_retained,
-        generated_position_mean=generated_position_mean, kv_bytes=1000.0,
+        generated_position_mean=generated_position_mean,
+        ablated_targeted=ablated_targeted, ablated_other=ablated_other, kv_bytes=1000.0,
         kv_bytes_kind="analytical", compression_ratio=compression_ratio,
         decode_wall_seconds=0.1)
 
@@ -208,3 +210,19 @@ def test_a_baseline_whose_draws_never_move_is_flagged_within_its_task():
                  for draw in EVICTION_DRAWS]
 
     assert any("not varying" in flag for flag in analysis.analyse(rows)[0].flags)
+
+
+def test_an_ablation_arm_that_ran_out_of_its_class_is_flagged():
+    """Both arms converge once the targeted class is exhausted, so a null between them
+    stops being evidence. The counts are recorded per row precisely so the analysis can
+    say this rather than the reader having to notice it."""
+    rows = cell_rows([1] * 6, [0] * 6)
+    for seed, example in UNITS:
+        rows.append(row(method_key="ablate-numeric", metric=0.0, seed=seed, example=example,
+                        eviction_seed=0, ablated_targeted=8, ablated_other=109))
+        rows.append(row(method_key="ablate-other", metric=0.0, seed=seed, example=example,
+                        eviction_seed=0, ablated_targeted=117, ablated_other=0))
+
+    flags = " ".join(analysis.analyse(rows)[0].flags)
+    assert "ablate-numeric exhausted the class it targets" in flags
+    assert "ablate-other" not in flags, "the arm that did not spill must not be flagged"

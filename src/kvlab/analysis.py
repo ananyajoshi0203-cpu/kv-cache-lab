@@ -42,6 +42,10 @@ than silently drops:
   is not random in practice.
 - **compression** -- requested retained fraction against the fraction actually
   achieved, both reported.
+- **ablation separability** -- a trace-ablation arm that ran out of the class it
+  targets spills into the other class, at which point both arms are removing mostly
+  the same positions and a null result between them means nothing. This is the
+  failure that would most easily be read as "the trace does not matter".
 """
 
 from __future__ import annotations
@@ -68,6 +72,7 @@ MEMORY_TOLERANCE_TOKENS = 1.0
 BASELINE_KEY = "random"
 CONTROL_KEY = "full"
 NO_EVICTION_SEED = -1
+ABLATION_PREFIX = "ablate-"
 
 _COERCE = {"int": int, "float": float, "str": str}
 
@@ -112,6 +117,10 @@ class MethodResult:
     generated_retained: float
     total_retained: float
     generated_position_mean: float
+    #: For a trace ablation, how much of its removal came from the class it targets
+    #: and how much spilled into the other. Spill is what makes two arms converge.
+    ablated_targeted: float
+    ablated_other: float
     actual_retained_fraction: float
     kv_bytes: float
 
@@ -215,6 +224,8 @@ def analyse(rows: Iterable[BoundaryRow], *, solvable_at: float = 0.5,
                 total_retained=mean(row.total_retained for row in method_rows),
                 generated_position_mean=mean(row.generated_position_mean
                                              for row in method_rows),
+                ablated_targeted=mean(row.ablated_targeted for row in method_rows),
+                ablated_other=mean(row.ablated_other for row in method_rows),
                 actual_retained_fraction=mean(1 - row.compression_ratio for row in method_rows),
                 kv_bytes=mean(row.kv_bytes for row in method_rows)))
 
@@ -256,6 +267,14 @@ def check_cell(group: Sequence[BoundaryRow], methods: Sequence[MethodResult],
         if drift > MEMORY_TOLERANCE_TOKENS / max(1.0, method.total_retained) + 0.02:
             flags.append(f"{method.method_key} retained {method.actual_retained_fraction:.3f} "
                          f"of the cache against a requested {requested_fraction:.2f}")
+
+    for method in methods:
+        if method.method_key.startswith(ABLATION_PREFIX) and method.ablated_other > 0:
+            flags.append(
+                f"{method.method_key} exhausted the class it targets and removed "
+                f"{method.ablated_other:.0f} positions from the other one: at this budget the "
+                "two ablation arms remove mostly the same positions, so a null between them "
+                "is not evidence that the trace does not matter")
 
     baseline = [row for row in group if row.method_key == BASELINE_KEY]
     if baseline:
@@ -304,6 +323,8 @@ def flat_rows(results: Iterable[CellResult]) -> list[dict]:
                 "generated_retained": method.generated_retained,
                 "total_retained": method.total_retained,
                 "generated_position_mean": method.generated_position_mean,
+                "ablated_targeted": method.ablated_targeted,
+                "ablated_other": method.ablated_other,
                 "kv_bytes": method.kv_bytes, "flags": " | ".join(cell.flags),
             })
     return records

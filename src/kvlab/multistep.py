@@ -5,12 +5,28 @@ something out of the *prompt* after the prompt cache has been compressed. It can
 probe the other one, because the answer is emitted within the first few generated
 tokens, before a budget over the generated cache has anything to bite on.
 
-This task inverts that. Several quantities are stated in the prompt, and a chain of
-sequential operations combines them. Each step consumes the running total the model
-just produced, so by the last step the operand the model needs exists *only* in the
-tokens it generated itself. Evicting the wrong generated KV therefore breaks the
-answer in a way evicting prompt KV does not, which is the whole reason the task is
-here.
+This task gives the generated cache something to do. Several quantities are stated in
+the prompt, and a chain of sequential operations combines them. Each step consumes the
+running total the model just produced, so the natural way to answer is to read back
+what it already wrote.
+
+**What this does not establish.** Every fact and every operation is in the prompt, so
+a model whose prompt cache is intact can in principle recompute the answer from
+scratch at any point. The trace is a shortcut, not a private store, and an earlier
+version of this docstring claimed otherwise. That claim is withdrawn: no deterministic
+automatically-scored task can rule out recomputation by construction, because being
+scorable means the answer is a function of the prompt.
+
+So whether the model actually routes its computation through its own trace is
+measured, not assumed. kvlab.ablation removes generated KV by token class -- the
+positions holding digits, against the positions holding everything else, at the same
+budget and with the prompt intact -- and the difference between those two arms is the
+evidence. Until that intervention has been run on a model that can do the task, treat
+results on the generated axis as provisional.
+
+Two levers if the intervention comes back null: more steps, so recomputation costs
+more than retrieval; and back-references ("add the result of step 2"), which ask for a
+specific earlier intermediate rather than the most recent one.
 
 Deterministic from a seed, scored automatically, no external service. Nothing about
 hidden or private reasoning is used or required: the trace is ordinary visible

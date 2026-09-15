@@ -36,6 +36,13 @@ class KVMethod:
         self.last_indices = None
         return past_key_values
 
+    def observe(self, token_id: int) -> None:
+        """Called with each generated token as its KV enters the cache, before
+        step(). Cache methods ignore it: attention weights are what they score on,
+        and a method that needed to know which token it was looking at would be
+        reading the output it is meant to be agnostic to. It exists for diagnostics
+        that deliberately target the cache by token identity."""
+
     def kept_len(self, orig_len: int) -> int:
         return orig_len
 

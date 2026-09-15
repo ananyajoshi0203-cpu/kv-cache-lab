@@ -146,13 +146,26 @@ within the first few generated tokens, so a budget over the generated cache has
 nothing to bite on. That is a property of the task, not a bug, and it is why it
 cannot be the only one.
 
-`multistep` probes **generated-trace** retention. Quantities are stated in the prompt
-and a chain of operations combines them, each step consuming the running total the
-model just wrote, so by the last step the operand it needs exists only in its own
-generated KV. Scored on the last integer written and on nothing about the shape of
+`multistep` gives the **generated** cache something to do. Quantities are stated in
+the prompt and a chain of operations combines them, each step consuming the running
+total the model just wrote, so the natural way to answer is to read back what it
+already wrote. Scored on the last integer written and on nothing about the shape of
 the reasoning; chains whose answer equals an operand or an intermediate are rejected
 and redrawn, so a model that copies a number or truncates its trace cannot score by
 accident.
+
+**It does not follow that the answer requires the trace.** Every fact and every
+operation is in the prompt, so a model with its prompt cache intact can in principle
+recompute from scratch. No deterministic, automatically scored task can rule that out
+by construction — being scorable means the answer is a function of the prompt. So it
+is measured instead. `kvlab.ablation` keeps the prompt and removes generated KV **by
+token class**: one arm takes the positions holding digits first, the other takes
+everything else first, at the same generation budget and therefore the same retained
+KV. If the numeric arm degrades and the other does not, the model was reading its own
+intermediate results out of the cache. If they degrade alike, the trace was not
+carrying the computation and the workload needs redesigning before its generated axis
+is worth reporting. Until that has been run on a model that can do the task,
+**generated-axis results are provisional**.
 
 ### Redundancy is the second independent variable
 

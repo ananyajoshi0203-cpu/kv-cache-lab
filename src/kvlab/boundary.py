@@ -52,14 +52,17 @@ Two workloads, because they fail differently and the study needs both.
   the first few generated tokens, so a budget over the generated cache cannot move
   its score. That is a limitation of the task, stated rather than hidden, and it is
   precisely why it cannot be the only one.
-- **multistep** (kvlab.multistep) probes generated-trace retention. Each step
-  consumes the running total the model just wrote, so the last operand exists only
-  in the generated KV. It also carries the redundancy variable: at a fixed prompt
-  length and a fixed answer, its facts can be stated once or several times in
-  different words while filler shrinks to compensate, which moves the share of
-  prompt KV carrying information the model has seen elsewhere without moving the
-  answer. That separates a redundancy account of the boundary from a
-  context-fraction one.
+- **multistep** (kvlab.multistep) gives the generated cache something to do. Each
+  step consumes the running total the model just wrote, so the natural way to answer
+  is to read back what it already wrote. It does *not* follow that the operand exists
+  only in the generated KV: every fact is in the prompt, so the trace is a shortcut
+  the model may or may not lean on, and whether it does is measured by the trace
+  ablation in kvlab.ablation rather than assumed. multistep also carries the
+  redundancy variable: at a fixed prompt length and a fixed answer, its facts can be
+  stated once or several times in different words while filler shrinks to compensate,
+  which moves the share of prompt KV carrying information the model has seen elsewhere
+  without moving the answer. That separates a redundancy account of the boundary from
+  a context-fraction one.
 
 Both are scored on the final answer only, never on the shape of the reasoning, and
 never with perplexity alone. Workload is a two-function interface, so adding a third
@@ -75,10 +78,11 @@ import random
 import time
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import asdict, dataclass
+from functools import lru_cache
 from enum import Enum
 from statistics import mean, pstdev
 
-from . import multistep, needle
+from . import ablation, multistep, needle
 from .accounting import CacheLedger
 from .memory import ModelConfig
 from .methods import KVMethod, build
@@ -112,10 +116,19 @@ NO_PROMPT_PROTECTED_FORM = dict.fromkeys(
 SCORED_KEYS = ("h2o", "snapkv", "cake", "obcache")
 DEFAULT_METHODS = ("full", "random", *SCORED_KEYS)
 
+#: Diagnostics, not cache methods, and never to be reported as such. They keep the
+#: prompt and remove generated KV by what the token was, to test whether the model's
+#: computation actually routes through its own trace. See kvlab.ablation.
+ABLATION_KEYS = tuple(f"ablate-{target}" for target in ablation.TARGETS)
+
+#: Methods that protect the prompt by construction, so the prompt-protected regime
+#: asks nothing new of them and their budget is always over the generated cache.
+PROMPT_PROTECTING_KEYS = ("random", *ABLATION_KEYS)
+
 #: Methods whose behaviour depends on an eviction draw. Everything else is a
 #: deterministic function of the task, so it is decoded once and reported once
 #: rather than once per eviction seed.
-STOCHASTIC_KEYS = ("random",)
+STOCHASTIC_KEYS = PROMPT_PROTECTING_KEYS
 
 #: The eviction seed recorded for a deterministic method. Not a seed that was used:
 #: a marker that the row has no eviction draw behind it, so nothing downstream can
@@ -170,7 +183,7 @@ class Budget:
         when it has none."""
         if key == "full":
             return 0, ""
-        if key == "random" or regime is Regime.PROMPT_PROTECTED:
+        if key in PROMPT_PROTECTING_KEYS or regime is Regime.PROMPT_PROTECTED:
             budget = self.generation_budget
             return (budget, "") if budget >= 0 else (None, UNREACHABLE_BY_PROTECTION)
         if key == "h2o":
@@ -404,8 +417,8 @@ def budget_metadata(regime: Regime, key: str, budget: Budget) -> dict[str, int]:
             "window": budget.window(nominal) if key in SCORED_KEYS else 0}
 
 
-def method_for(regime: Regime, key: str, budget: Budget,
-               seed: int) -> tuple[KVMethod, int, int] | str:
+def method_for(regime: Regime, key: str, budget: Budget, seed: int,
+               numeric_tokens: frozenset[int] | None = None) -> tuple[KVMethod, int, int] | str:
     """The method, the nominal budget it was handed and the recency window it ended
     up with, or the reason it has no configuration that reaches this cell's target.
     Returning the budget alongside the method is the point: a row that does not
@@ -420,6 +433,13 @@ def method_for(regime: Regime, key: str, budget: Budget,
         return build("full"), 0, 0
     if key == "random":
         return build("random", generation_budget=nominal, seed=seed), nominal, 0
+    if key in ABLATION_KEYS:
+        if numeric_tokens is None:
+            raise ValueError(f"{key} needs the vocabulary's numeric token ids; they come "
+                             "from the tokenizer that will run the sweep")
+        return ablation.TraceAblation(
+            generation_budget=nominal, target=key.removeprefix("ablate-"),
+            numeric_tokens=numeric_tokens, seed=seed), nominal, 0
     if key not in SCORED_KEYS:
         raise KeyError(f"{key} is not a method this sweep knows how to budget")
 
@@ -463,6 +483,11 @@ class BoundaryRow:
     generated_retained: float
     total_retained: float
     generated_position_mean: float
+    #: How many positions a trace ablation removed from the class it targets and from
+    #: the other, so the two arms can be checked against each other rather than
+    #: assumed matched. Zero for every method that is not a trace ablation.
+    ablated_targeted: int
+    ablated_other: int
     kv_bytes: float
     kv_bytes_kind: str
     compression_ratio: float
@@ -628,6 +653,12 @@ def sweep(model_name: str = "distilgpt2", *,
     return SweepResult(rows=rows, skipped=skipped, cfg=cfg)
 
 
+@lru_cache(maxsize=4)
+def _numeric_tokens(tokenizer) -> frozenset[int]:
+    """One scan of the vocabulary per run, not per decode."""
+    return ablation.numeric_token_ids(tokenizer)
+
+
 def _one(model, tokenizer, cfg, regime: Regime, key: str, cell: Cell, task_seed: int,
          eviction_seed: int, index: int, examples: int, generate_stepwise) -> dict | str:
     workload = WORKLOADS[cell.workload]
@@ -637,7 +668,9 @@ def _one(model, tokenizer, cfg, regime: Regime, key: str, cell: Cell, task_seed:
     if abs(ids.shape[1] - cell.prompt_length) > prompt_band(cell.prompt_length):
         return PROMPT_TARGET_UNREACHABLE
     budget = Budget(ids.shape[1], cell.generation_length, cell.retained_fraction)
-    chosen = method_for(regime, key, budget, eviction_seed)
+    chosen = method_for(regime, key, budget, eviction_seed,
+                        numeric_tokens=_numeric_tokens(tokenizer) if key in ABLATION_KEYS
+                        else None)
     if isinstance(chosen, str):
         return chosen
     method, _nominal, _window = chosen
@@ -660,6 +693,8 @@ def _one(model, tokenizer, cfg, regime: Regime, key: str, cell: Cell, task_seed:
         "generated_retained": account.generated_retained,
         "total_retained": account.total_retained,
         "generated_position_mean": account.generated_position_mean,
+        "ablated_targeted": getattr(method, "removed_targeted", 0),
+        "ablated_other": getattr(method, "removed_other", 0),
         "kv_bytes": account.total_kv_bytes,
         "compression_ratio": account.compression_ratio,
         "decode_wall_seconds": elapsed,

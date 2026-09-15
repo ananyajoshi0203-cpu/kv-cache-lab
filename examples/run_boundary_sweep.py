@@ -57,6 +57,10 @@ ARGUMENTS = [
                                          "the command line overrides it")),
     (["--model"], dict(default="distilgpt2")),
     (["--workloads"], dict(type=words, default=tuple(boundary.WORKLOADS))),
+    (["--methods"], dict(type=words, default=None,
+                         help="which methods to run; omit for the cache methods. Add "
+                              f"{' and '.join(boundary.ABLATION_KEYS)} to run the trace "
+                              "ablation, which is a diagnostic and not a cache method")),
     (["--shapes"], dict(type=shapes, default=boundary.DEFAULT_SHAPES,
                         help="prompt x generation pairs, e.g. 128x64,256x512")),
     (["--retain"], dict(type=floats, default=boundary.DEFAULT_FRACTIONS,
@@ -91,8 +95,8 @@ def build_parser(explicit_only=False):
     return parser
 
 
-CONFIG_KEYS = ("model", "workloads", "shapes", "retain", "redundancy", "task_seeds",
-               "eviction_seeds", "examples")
+CONFIG_KEYS = ("model", "workloads", "methods", "shapes", "retain", "redundancy",
+               "task_seeds", "eviction_seeds", "examples")
 
 
 def resolve(argv=None):
@@ -125,7 +129,7 @@ def main():
         args.model, workload_keys=args.workloads, shapes=args.shapes,
         retained_fractions=args.retain, redundancies=args.redundancy,
         task_seeds=args.task_seeds, eviction_seeds=args.eviction_seeds,
-        examples=args.examples)
+        examples=args.examples, method_keys=args.methods)
     summaries = boundary.summarize(result.rows)
     log.info("\n%s", boundary.format_summary(summaries, "metric"))
     for skip in result.skipped:
@@ -140,6 +144,7 @@ def main():
             "model": result.cfg.name, "layers": result.cfg.layers,
             "kv_heads": result.cfg.n_kv_heads, "head_dim": result.cfg.head_dim,
             "workloads": list(args.workloads),
+            "methods": list(args.methods) if args.methods else list(boundary.DEFAULT_METHODS),
             "workload_notes": {key: boundary.WORKLOADS[key].note for key in args.workloads},
             "shapes": [list(shape) for shape in args.shapes],
             "retained_fractions": list(args.retain),

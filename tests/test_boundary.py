@@ -160,7 +160,7 @@ def row(seed, metric_value, method="Prompt-protected random", regime="published"
         total_budget=88, generation_budget=-42, nominal_budget=0, window=0,
         prompt_retained=prompt_retained, generated_retained=generated_retained,
         total_retained=prompt_retained + generated_retained, generated_position_mean=0.0,
-        kv_bytes=1.0, kv_bytes_kind="analytical", compression_ratio=0.25,
+        ablated_targeted=0, ablated_other=0, kv_bytes=1.0, kv_bytes_kind="analytical", compression_ratio=0.25,
         decode_wall_seconds=0.1)
 
 
