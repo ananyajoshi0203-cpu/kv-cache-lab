@@ -3,11 +3,37 @@
   "purpose": "Verify that the workloads build, the runner sweeps, results serialize, the analysis reads them back and the figures draw. Not evidence about anything.",
   "not_evidence": "distilgpt2 cannot do the multistep task at all, so every multistep metric here is expected to be zero and the full-cache solvability check is expected to flag every multistep cell. That is the check working, not a result.",
   "model": "distilgpt2",
-  "workloads": ["needle", "multistep"],
-  "shapes": [[128, 64], [384, 96]],
-  "retain": [0.3, 0.6, 0.9],
-  "seeds": [0, 1, 2],
+  "workloads": [
+    "needle",
+    "multistep"
+  ],
+  "shapes": [
+    [
+      128,
+      64
+    ],
+    [
+      384,
+      96
+    ]
+  ],
+  "retain": [
+    0.3,
+    0.6,
+    0.9
+  ],
   "examples": 2,
   "redundancy": null,
-  "expected_skips": "multistep at prompt 128 is feasible at low redundancy only: medium needs 165 prompt tokens and high needs 265 before any filler, so those cells are refused rather than run at the wrong prompt length."
+  "expected_skips": "multistep at prompt 128 is feasible at low redundancy only: medium needs 165 prompt tokens and high needs 265 before any filler, so those cells are refused rather than run at the wrong prompt length.",
+  "task_seeds": [
+    0,
+    1,
+    2
+  ],
+  "eviction_seeds": [
+    0,
+    1,
+    2
+  ],
+  "seed_semantics": "task_seeds choose the task instance; eviction_seeds choose the random baseline's draw and nothing else. They are swept independently so a random method's spread can be attributed to one or the other, and deterministic methods are decoded once per task instance rather than once per draw."
 }

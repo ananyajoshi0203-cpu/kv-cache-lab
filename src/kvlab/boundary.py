@@ -111,6 +111,16 @@ NO_PROMPT_PROTECTED_FORM = dict.fromkeys(
 
 SCORED_KEYS = ("h2o", "snapkv", "cake", "obcache")
 DEFAULT_METHODS = ("full", "random", *SCORED_KEYS)
+
+#: Methods whose behaviour depends on an eviction draw. Everything else is a
+#: deterministic function of the task, so it is decoded once and reported once
+#: rather than once per eviction seed.
+STOCHASTIC_KEYS = ("random",)
+
+#: The eviction seed recorded for a deterministic method. Not a seed that was used:
+#: a marker that the row has no eviction draw behind it, so nothing downstream can
+#: average a deterministic method over draws it never made.
+NO_EVICTION_SEED = -1
 _WINDOW_KWARG = {"h2o": "recent", "obcache": "recent", "snapkv": "window", "cake": "window"}
 
 
@@ -426,7 +436,12 @@ class BoundaryRow:
     regime: str
     method: str
     method_key: str
-    seed: int
+    #: The task instance: which facts, operations, filler and target this row ran on.
+    task_seed: int
+    #: The eviction draw, NO_EVICTION_SEED for a method that has none. Separated from
+    #: the task seed because one number doing both jobs cannot say whether a random
+    #: method's spread comes from the tasks it saw or from the draws it made.
+    eviction_seed: int
     example: int
     task: str
     redundancy: str
@@ -516,17 +531,27 @@ def grid(workload_keys: Iterable[str], shapes: Iterable[Shape],
     return cells
 
 
-def _memo_key(regime: Regime, method_key: str, cell: Cell, seed: int, index: int) -> tuple:
+def eviction_seeds_for(method_key: str, eviction_seeds: Sequence[int]) -> tuple[int, ...]:
+    """A deterministic method gets one row, not one per eviction seed. Repeating its
+    inference across draws it never makes would cost the same again and would also put
+    duplicate rows into every mean and every bootstrap interval."""
+    return tuple(eviction_seeds) if method_key in STOCHASTIC_KEYS else (NO_EVICTION_SEED,)
+
+
+def _memo_key(regime: Regime, method_key: str, cell: Cell, task_seed: int,
+              eviction_seed: int, index: int) -> tuple:
     """What a decode actually depends on, so nothing is run twice for a distinction
     it cannot see. The full cache ignores the budget entirely, and both it and
     random behave identically in either regime -- random is prompt-protected by
     construction -- so they are decoded once and reported under every cell that
     shares what they do depend on. Only the decode is shared: everything a cell
     knows and a decode does not comes from budget_metadata, per row."""
+    draw = eviction_seed if method_key in STOCHASTIC_KEYS else NO_EVICTION_SEED
     if method_key == "full":
         return ("-", "full", cell.workload, cell.redundancy, cell.prompt_length,
-                cell.generation_length, seed, index)
-    return (regime.value if method_key in SCORED_KEYS else "-", method_key, cell, seed, index)
+                cell.generation_length, task_seed, index)
+    return (regime.value if method_key in SCORED_KEYS else "-", method_key, cell,
+            task_seed, index, draw)
 
 
 #: Prompt-dominated through generation-dominated, as explicit pairs. Not every cell
@@ -545,7 +570,8 @@ def sweep(model_name: str = "distilgpt2", *,
           shapes: Sequence[Shape] = DEFAULT_SHAPES,
           retained_fractions: Sequence[float] = DEFAULT_FRACTIONS,
           redundancies: Sequence[str] | None = None,
-          seeds: Sequence[int] = (0, 1, 2, 3, 4),
+          task_seeds: Sequence[int] = (0, 1, 2, 3, 4),
+          eviction_seeds: Sequence[int] = (0, 1, 2, 3, 4),
           examples: int = 1,
           regimes: Sequence[Regime] = tuple(Regime),
           method_keys: Sequence[str] | None = None) -> SweepResult:
@@ -574,12 +600,14 @@ def sweep(model_name: str = "distilgpt2", *,
                 f"{limit}-position context of {model_name}")
         for regime in regimes:
             for key in (method_keys or DEFAULT_METHODS):
-                for seed in seeds:
-                    for index in range(examples):
-                        memo_key = _memo_key(regime, key, cell, seed, index)
+                for task_seed in task_seeds:
+                    for index, draw in [(i, d) for i in range(examples)
+                                        for d in eviction_seeds_for(key, eviction_seeds)]:
+                        memo_key = _memo_key(regime, key, cell, task_seed, draw, index)
                         if memo_key not in memo:
-                            memo[memo_key] = _one(model, tokenizer, cfg, regime, key,
-                                                  cell, seed, index, examples, generate_stepwise)
+                            memo[memo_key] = _one(model, tokenizer, cfg, regime, key, cell,
+                                                  task_seed, draw, index, examples,
+                                                  generate_stepwise)
                         measured = memo[memo_key]
                         if isinstance(measured, str):
                             note(regime, key, cell, measured)
@@ -587,7 +615,8 @@ def sweep(model_name: str = "distilgpt2", *,
                         budget = Budget(measured["prompt_length"], cell.generation_length,
                                         cell.retained_fraction)
                         rows.append(BoundaryRow(
-                            model=cfg.name, regime=regime.value, seed=seed, example=index,
+                            model=cfg.name, regime=regime.value, task_seed=task_seed,
+                            eviction_seed=draw, example=index,
                             task=cell.workload, redundancy=cell.redundancy,
                             task_metric=WORKLOADS[cell.workload].task_metric,
                             requested_prompt_length=cell.prompt_length,
@@ -599,16 +628,16 @@ def sweep(model_name: str = "distilgpt2", *,
     return SweepResult(rows=rows, skipped=skipped, cfg=cfg)
 
 
-def _one(model, tokenizer, cfg, regime: Regime, key: str, cell: Cell,
-         seed: int, index: int, examples: int, generate_stepwise) -> dict | str:
+def _one(model, tokenizer, cfg, regime: Regime, key: str, cell: Cell, task_seed: int,
+         eviction_seed: int, index: int, examples: int, generate_stepwise) -> dict | str:
     workload = WORKLOADS[cell.workload]
-    example = workload.build(tokenizer, cell.prompt_length, index, examples, seed,
+    example = workload.build(tokenizer, cell.prompt_length, index, examples, task_seed,
                              cell.redundancy)
     ids = tokenizer(example.context + example.question, return_tensors="pt").input_ids
     if abs(ids.shape[1] - cell.prompt_length) > prompt_band(cell.prompt_length):
         return PROMPT_TARGET_UNREACHABLE
     budget = Budget(ids.shape[1], cell.generation_length, cell.retained_fraction)
-    chosen = method_for(regime, key, budget, seed)
+    chosen = method_for(regime, key, budget, eviction_seed)
     if isinstance(chosen, str):
         return chosen
     method, _nominal, _window = chosen
@@ -654,7 +683,8 @@ class Summary:
     prompt_length: int
     generation_length: int
     retained_fraction: float
-    seeds: int
+    task_seeds: int
+    eviction_seeds: int
     metric_mean: float
     metric_stdev: float
     prompt_retained: float
@@ -672,14 +702,19 @@ def summarize(rows: Iterable[BoundaryRow]) -> list[Summary]:
     summaries = []
     for key, group in grouped.items():
         regime, method, workload, redundancy, prompt_length, generation_length, fraction = key
-        per_seed: dict[int, list[float]] = {}
+        per_task: dict[tuple[int, int], list[float]] = {}
         for row in group:
-            per_seed.setdefault(row.seed, []).append(row.metric_value)
-        seed_means = [mean(values) for values in per_seed.values()]
+            per_task.setdefault((row.task_seed, row.example), []).append(row.metric_value)
+        # Eviction draws are replicates *within* a task instance, so they are averaged
+        # there first. Pooling them with task instances would let a method with more
+        # draws look more precisely measured than one with none.
+        seed_means = [mean(values) for values in per_task.values()]
         summaries.append(Summary(
             regime=regime, method=method, workload=workload, redundancy=redundancy,
             prompt_length=prompt_length, generation_length=generation_length,
-            retained_fraction=fraction, seeds=len(seed_means),
+            retained_fraction=fraction, task_seeds=len({row.task_seed for row in group}),
+            eviction_seeds=len({row.eviction_seed for row in group
+                                if row.eviction_seed != NO_EVICTION_SEED}),
             metric_mean=mean(seed_means), metric_stdev=pstdev(seed_means),
             prompt_retained=mean(row.prompt_retained for row in group),
             total_retained=mean(row.total_retained for row in group),
@@ -689,7 +724,7 @@ def summarize(rows: Iterable[BoundaryRow]) -> list[Summary]:
 
 def format_summary(summaries: Sequence[Summary], task_metric: str) -> str:
     header = (f"{'workload':<10}{'redun':<7}{'regime':<17}{'method':<30}{'prompt':>7}{'gen':>6}"
-              f"{'retain':>7}{'seeds':>6}{task_metric:>16}{'stdev':>7}{'kept':>8}"
+              f"{'retain':>7}{'tsd':>5}{'esd':>5}{task_metric:>16}{'stdev':>7}{'kept':>8}"
               f"{'prompt_kept':>12}{'KV KB':>9}")
     lines = [header, "-" * len(header)]
     order = sorted(summaries, key=lambda s: (s.workload, s.redundancy, s.regime, s.prompt_length,
@@ -697,7 +732,8 @@ def format_summary(summaries: Sequence[Summary], task_metric: str) -> str:
     for s in order:
         lines.append(f"{s.workload:<10}{s.redundancy:<7}{s.regime:<17}{s.method:<30}"
                      f"{s.prompt_length:>7}{s.generation_length:>6}{s.retained_fraction:>7.2f}"
-                     f"{s.seeds:>6}{s.metric_mean:>16.2f}{s.metric_stdev:>7.2f}"
+                     f"{s.task_seeds:>5}{s.eviction_seeds:>5}"
+                     f"{s.metric_mean:>16.2f}{s.metric_stdev:>7.2f}"
                      f"{s.total_retained:>8.1f}{s.prompt_retained:>12.1f}{s.kv_bytes / 1024:>9.1f}")
     return "\n".join(lines)
 

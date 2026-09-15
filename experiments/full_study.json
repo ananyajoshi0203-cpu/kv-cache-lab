@@ -54,13 +54,6 @@
     0.75,
     0.9
   ],
-  "seeds": [
-    0,
-    1,
-    2,
-    3,
-    4
-  ],
   "examples": 8,
   "redundancy": null,
   "methods": [
@@ -76,5 +69,20 @@
     "prompt_protected"
   ],
   "feasibility": "multistep needs room for its evidence before any filler: 115 prompt tokens at low redundancy, 165 at medium, 265 at high, measured with minimum_prompt_tokens on the GPT-2 tokenizer. Prompt 128 therefore runs multistep at low redundancy only and prompt 256 at low and medium; all three levels are comparable at 384 and 512, which is why 384x256 is in the grid. Cells below a level's floor are refused with a reason rather than run at the wrong prompt length, since a prompt that overflows its target moves redundancy and prompt length together and neither can then be read.",
-  "regime_note": "SnapKV, CAKE and OBCache have no prompt-protected form and are not run in that regime. They vote with an observation window of prompt queries, and protecting the prompt leaves a single decode query, which is a different scorer under the same name."
+  "regime_note": "SnapKV, CAKE and OBCache have no prompt-protected form and are not run in that regime. They vote with an observation window of prompt queries, and protecting the prompt leaves a single decode query, which is a different scorer under the same name.",
+  "task_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "eviction_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "seed_semantics": "task_seeds choose the task instance; eviction_seeds choose the random baseline's draw and nothing else. They are swept independently so a random method's spread can be attributed to one or the other, and deterministic methods are decoded once per task instance rather than once per draw."
 }

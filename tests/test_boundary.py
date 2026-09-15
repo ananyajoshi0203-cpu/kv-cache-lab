@@ -22,9 +22,9 @@ import torch
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kvlab.boundary import (                                          # noqa: E402
-    NO_PROMPT_PROTECTED_FORM, PROMPT_TARGET_UNREACHABLE, UNREACHABLE_BY_PRESS,
-    UNREACHABLE_BY_PROTECTION, BoundaryRow, Budget, PromptProtected, Regime, Summary,
-    format_summary, method_for, summarize, sweep, write_rows,
+    NO_EVICTION_SEED, NO_PROMPT_PROTECTED_FORM, PROMPT_TARGET_UNREACHABLE,
+    UNREACHABLE_BY_PRESS, UNREACHABLE_BY_PROTECTION, BoundaryRow, Budget, PromptProtected,
+    Regime, Summary, format_summary, method_for, summarize, sweep, write_rows,
 )
 from kvlab import boundary as boundary_module                        # noqa: E402
 from kvlab.memory import MODELS                                       # noqa: E402
@@ -146,9 +146,11 @@ def test_an_after_prefill_press_cannot_be_wrapped():
 
 def row(seed, metric_value, method="Prompt-protected random", regime="published",
         generation_length=48, retained_fraction=0.5, task="needle", redundancy="none",
-        method_key="random", prompt_retained=130.0, generated_retained=0.0):
+        method_key="random", prompt_retained=130.0, generated_retained=0.0,
+        eviction_seed=0):
     return BoundaryRow(
-        model="distilgpt2", regime=regime, method=method, method_key=method_key, seed=seed,
+        model="distilgpt2", regime=regime, method=method, method_key=method_key,
+        task_seed=seed, eviction_seed=eviction_seed,
         example=0, task=task, redundancy=redundancy, facts=1, statements=1,
         task_metric="passkey_em", metric_value=metric_value,
         requested_prompt_length=128, prompt_length=130,
@@ -166,13 +168,13 @@ def test_summary_reports_the_spread_across_seeds_not_one_lucky_draw():
     hits = [1.0, 1.0, 1.0, 0.0, 0.0]
     summaries = summarize([row(seed, hit) for seed, hit in enumerate(hits)])
     assert len(summaries) == 1
-    assert summaries[0].seeds == len(hits)
+    assert summaries[0].task_seeds == len(hits)
     assert summaries[0].metric_mean == pytest.approx(sum(hits) / len(hits))
     assert summaries[0].metric_stdev > 0
 
     split = summarize([row(0, 1.0), row(1, 1.0, method="H2O")])
     assert {s.method for s in split} == {"Prompt-protected random", "H2O"}
-    assert all(s.seeds == 1 and s.metric_stdev == 0 for s in split)
+    assert all(s.task_seeds == 1 and s.metric_stdev == 0 for s in split)
 
 
 def test_results_carry_every_column_a_reader_has_to_check(tmp_path):
@@ -185,7 +187,8 @@ def test_results_carry_every_column_a_reader_has_to_check(tmp_path):
 
     with open(f"{stem}.csv") as handle:
         header = next(csv.reader(handle))
-    required = {"model", "method", "seed", "prompt_length", "requested_generation_length",
+    required = {"model", "method", "task_seed", "eviction_seed", "prompt_length",
+                "requested_generation_length",
                 "actual_generation_length", "generation_budget", "total_budget",
                 "prompt_retained", "generated_retained", "total_retained", "kv_bytes",
                 "kv_bytes_kind", "task", "task_metric", "metric_value"}
@@ -220,7 +223,7 @@ def test_every_independent_variable_survives_summarizing():
     assert len(summaries) == len(CELL_METRIC)
     assert {(s.generation_length, s.retained_fraction): s.metric_mean
             for s in summaries} == CELL_METRIC
-    assert all(s.seeds == 3 and s.metric_stdev == 0 for s in summaries)
+    assert all(s.task_seeds == 3 and s.metric_stdev == 0 for s in summaries)
     assert "gen" in format_summary(summaries, "passkey_em").splitlines()[0]
 
 
@@ -248,25 +251,40 @@ def fake_cache(length, layers=CFG.layers, heads=CFG.n_kv_heads):
     return tuple((key.clone(), key.clone()) for _ in range(layers))
 
 
+DECODES = []
+
+
+def fake_attentions(cache, queries):
+    """Attention weights shaped like the real ones and fixed rather than random, so a
+    scored method stays a deterministic function of the task. Earlier positions score
+    higher, which gives the scorers something to prefer."""
+    return tuple(torch.linspace(1.0, 0.1, key.shape[2])
+                 .view(1, 1, 1, key.shape[2])
+                 .expand(1, key.shape[1], queries, key.shape[2]).contiguous()
+                 for key, _ in cache)
+
+
 def fake_generate(model, ids, method, max_new_tokens=64, eos_token_id=None, ledger=None):
     """A decode with no model in it, driving the ledger exactly as the real loop
     does so the accounting a row reports is still real."""
+    DECODES.append(method.key)
     cache = fake_cache(ids.shape[1])
     ledger.start(cache)
-    cache = method.apply(cache, None)
+    cache = method.apply(cache, fake_attentions(cache, ids.shape[1]))
     ledger.compact(method, cache)
     for _ in range(max_new_tokens - 1):
         grown = torch.zeros(1, cache[0][0].shape[1], 1, 2)
         cache = tuple((torch.cat([k, grown], dim=2), torch.cat([v, grown], dim=2))
                       for k, v in cache)
         ledger.append()
-        cache = method.step(cache, None)
+        cache = method.step(cache, fake_attentions(cache, 1))
         ledger.compact(method, cache)
     return torch.zeros(1, max_new_tokens, dtype=torch.long)
 
 
 @pytest.fixture
 def modelless_sweep(monkeypatch):
+    DECODES.clear()
     model = type("FakeModel", (), {"config": type("Config", (), {"n_positions": 1024})()})()
     monkeypatch.setattr("kvlab.model.load_model", lambda name, device="cpu": (
         model, FakeTokenizer(), CFG))
@@ -281,7 +299,8 @@ def test_a_reused_decode_never_carries_another_cells_budget(modelless_sweep):
     result = sweep("fake", workload_keys=("needle",),
                    shapes=tuple((FAKE_PROMPT_TOKENS, generation)
                                 for generation in GENERATION_LENGTHS),
-                   retained_fractions=RETAINED_FRACTIONS, seeds=(0,), examples=1,
+                   retained_fractions=RETAINED_FRACTIONS, task_seeds=(0,),
+                   eviction_seeds=(0,), examples=1,
                    regimes=(Regime.PUBLISHED,), method_keys=("full",))
 
     assert len(result.rows) == len(GENERATION_LENGTHS) * len(RETAINED_FRACTIONS)
@@ -308,7 +327,8 @@ def test_a_prompt_the_workload_cannot_build_is_skipped_not_relabelled(modelless_
     redundancy and prompt length on the same axis and make both unreadable."""
     result = sweep("fake", workload_keys=("multistep",),
                    shapes=((MULTISTEP_TOO_SHORT, 12), (MULTISTEP_ROOMY, 12)),
-                   retained_fractions=(0.5,), redundancies=("low",), seeds=(0,), examples=1,
+                   retained_fractions=(0.5,), redundancies=("low",), task_seeds=(0,),
+                   eviction_seeds=(0,), examples=1,
                    regimes=(Regime.PUBLISHED,), method_keys=("full",))
 
     assert {row.requested_prompt_length for row in result.rows} == {MULTISTEP_ROOMY}
@@ -338,9 +358,52 @@ def test_a_configuration_file_is_read_and_the_command_line_still_wins():
     from_file = cli.resolve(["--config", config])
     assert from_file.model == saved["model"]
     assert from_file.shapes == tuple(tuple(shape) for shape in saved["shapes"])
-    assert from_file.seeds == tuple(saved["seeds"])
+    assert from_file.task_seeds == tuple(saved["task_seeds"])
+    assert from_file.eviction_seeds == tuple(saved["eviction_seeds"])
     assert from_file.examples == saved["examples"]
 
-    overridden = cli.resolve(["--config", config, "--seeds", "9", "--examples", "3"])
-    assert overridden.seeds == (9,) and overridden.examples == 3
+    overridden = cli.resolve(["--config", config, "--task-seeds", "9", "--examples", "3"])
+    assert overridden.task_seeds == (9,) and overridden.examples == 3
+    assert overridden.eviction_seeds == tuple(saved["eviction_seeds"])
     assert overridden.shapes == from_file.shapes, "unspecified flags keep the file's values"
+
+
+TASK_SEEDS, EVICTION_SEEDS = (0, 1), (0, 1, 2)
+
+
+def seed_separated_sweep(**overrides):
+    return sweep("fake", workload_keys=("needle",), shapes=((FAKE_PROMPT_TOKENS, 12),),
+                 retained_fractions=(0.9,), task_seeds=TASK_SEEDS,
+                 eviction_seeds=EVICTION_SEEDS, examples=1,
+                 regimes=(Regime.PUBLISHED,), **overrides)
+
+
+def test_a_deterministic_method_is_not_decoded_once_per_eviction_draw(modelless_sweep):
+    """Eviction seeds are draws a scored method never makes. Sweeping one over the
+    other would pay for the same inference len(eviction_seeds) times and would also
+    put duplicate rows into every mean and every bootstrap interval."""
+    result = seed_separated_sweep(method_keys=("h2o", "random"))
+
+    deterministic = [r for r in result.rows if r.method_key == "h2o"]
+    stochastic = [r for r in result.rows if r.method_key == "random"]
+    assert len(deterministic) == len(TASK_SEEDS)
+    assert len(stochastic) == len(TASK_SEEDS) * len(EVICTION_SEEDS)
+    assert {r.eviction_seed for r in deterministic} == {NO_EVICTION_SEED}
+    assert {r.eviction_seed for r in stochastic} == set(EVICTION_SEEDS)
+    assert DECODES.count("h2o") == len(TASK_SEEDS)
+    assert DECODES.count("random") == len(TASK_SEEDS) * len(EVICTION_SEEDS)
+
+
+def test_the_task_seed_moves_the_task_and_the_eviction_seed_moves_only_the_draw(
+        modelless_sweep):
+    """The confound this replaces: one seed doing both jobs means a random method's
+    spread cannot be attributed to the tasks it saw or to the draws it made."""
+    rows = {(r.task_seed, r.eviction_seed): r
+            for r in seed_separated_sweep(method_keys=("random",)).rows}
+
+    same_task = [rows[(0, draw)] for draw in EVICTION_SEEDS]
+    assert len({r.prompt_length for r in same_task}) == 1, "the task must not move"
+    assert len({r.generated_position_mean for r in same_task}) > 1, "the draw must move"
+
+    same_draw = [rows[(task, 0)] for task in TASK_SEEDS]
+    assert len({r.prompt_length for r in same_draw}) > 1, "the task must move"

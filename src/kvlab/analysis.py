@@ -10,14 +10,25 @@ judgement about the difference, and printing a cut-off would bury that judgement
 inside the tool. The transition is something to look at in the plots, not something
 this module decides.
 
-Resampling unit: **one (seed, example) pair**. A seed fixes both the task instance
-and a random method's draw, and an example index fixes which instance of the task it
-is, so that pair is the smallest thing that could independently have come out
-differently. Bootstrap resamples those units with replacement, and for an advantage
-it resamples them *paired* -- the same unit contributes to the scored method and to
-random in the same replicate -- because the two ran on the same task instance and
-treating them as independent would overstate the interval. No p-values: an interval
-that overlaps zero says what needs saying.
+Resampling unit: **one (task_seed, example) pair**, which is one task instance. The
+sweep varies two independent sources of randomness and this module keeps them apart:
+a task seed chooses the facts, the operations, the filler and the target, while an
+eviction seed chooses only what a random method throws away. They are nested, not
+crossed with equal standing -- several eviction draws run against the *same* task --
+so eviction draws are averaged within their task instance first and the bootstrap
+resamples task instances. Pooling the two would let a method with five draws per task
+look five times more precisely measured than a deterministic method that ran once,
+which is an artefact of the sweep and not a property of the method.
+
+The dispersion each source contributes is reported separately: `metric.stdev` is the
+spread across task instances, `eviction_stdev` is the mean spread across draws within
+one instance. A random baseline whose eviction_stdev is near zero is not varying in
+practice, however many seeds it was given.
+
+An advantage is bootstrapped *paired* -- the same task instance contributes to the
+scored method and to the baseline in the same replicate -- because the two ran on the
+same task and treating them as independent would overstate the interval. No p-values:
+an interval that overlaps zero says what needs saying.
 
 Four sanity checks run before any of it is worth reading, and each one flags rather
 than silently drops:
@@ -26,8 +37,9 @@ than silently drops:
   the task uncompressed, nothing below it is evidence about compression.
 - **equal memory** -- every compressed method in a cell should hold the same retained
   KV, since that is what the sweep controls. Checked to slot granularity.
-- **random varies** -- once eviction is active, different seeds must retain visibly
-  different parts of the trace, or the random baseline is not random in practice.
+- **random varies** -- once eviction is active, different eviction seeds against the
+  *same* task must retain visibly different parts of the trace, or the random baseline
+  is not random in practice.
 - **compression** -- requested retained fraction against the fraction actually
   achieved, both reported.
 """
@@ -55,6 +67,7 @@ CONFIDENCE = 0.95
 MEMORY_TOLERANCE_TOKENS = 1.0
 BASELINE_KEY = "random"
 CONTROL_KEY = "full"
+NO_EVICTION_SEED = -1
 
 _COERCE = {"int": int, "float": float, "str": str}
 
@@ -87,6 +100,11 @@ class MethodResult:
     method: str
     method_key: str
     metric: Estimate
+    #: Mean spread across eviction draws within one task instance, and how many draws
+    #: each instance had. Zero draws means the method is deterministic given the task,
+    #: which is a different statement from a draw that never moved.
+    eviction_stdev: float
+    eviction_draws: int
     #: None when the baseline had no feasible configuration in this cell, which is a
     #: different statement from an advantage of zero and must not be read as one.
     scoring_advantage: Estimate | None
@@ -157,8 +175,15 @@ def analyse(rows: Iterable[BoundaryRow], *, solvable_at: float = 0.5,
         for row in group:
             by_method.setdefault(row.method_key, []).append(row)
 
-        baseline_units = {(row.seed, row.example): row.metric_value
-                          for row in by_method.get(BASELINE_KEY, [])}
+        def units_of(method_rows):
+            """Metrics keyed by task instance, with eviction draws kept together."""
+            units: dict[tuple[int, int], list[float]] = {}
+            for row in method_rows:
+                units.setdefault((row.task_seed, row.example), []).append(row.metric_value)
+            return units
+
+        baseline_units = {unit: mean(values)
+                          for unit, values in units_of(by_method.get(BASELINE_KEY, [])).items()}
         control = by_method.get(CONTROL_KEY, [])
         full_metric = mean(row.metric_value for row in control) if control else None
         solvable = full_metric is not None and full_metric >= solvable_at
@@ -167,9 +192,12 @@ def analyse(rows: Iterable[BoundaryRow], *, solvable_at: float = 0.5,
         for method_key, method_rows in sorted(by_method.items()):
             if method_key == CONTROL_KEY:
                 continue
-            values = [row.metric_value for row in method_rows]
-            paired = [(row.metric_value, baseline_units[(row.seed, row.example)])
-                      for row in method_rows if (row.seed, row.example) in baseline_units]
+            units = units_of(method_rows)
+            values = [mean(draws) for draws in units.values()]
+            draws_per_unit = max(len(draws) for draws in units.values())
+            spread = mean(pstdev(draws) for draws in units.values())
+            paired = [(mean(draws), baseline_units[unit])
+                      for unit, draws in units.items() if unit in baseline_units]
             advantage = None
             if method_key != BASELINE_KEY and paired:
                 low, high = _paired_bootstrap(paired, rng)
@@ -179,6 +207,9 @@ def analyse(rows: Iterable[BoundaryRow], *, solvable_at: float = 0.5,
             methods.append(MethodResult(
                 method=method_rows[0].method, method_key=method_key,
                 metric=_estimate(values, rng), scoring_advantage=advantage,
+                eviction_stdev=spread,
+                eviction_draws=0 if method_rows[0].eviction_seed == NO_EVICTION_SEED
+                else draws_per_unit,
                 prompt_retained=mean(row.prompt_retained for row in method_rows),
                 generated_retained=mean(row.generated_retained for row in method_rows),
                 total_retained=mean(row.total_retained for row in method_rows),
@@ -230,10 +261,17 @@ def check_cell(group: Sequence[BoundaryRow], methods: Sequence[MethodResult],
     if baseline:
         evicting = any(row.generated_retained < row.cached_generation_length
                        for row in baseline)
-        positions = {row.seed: row.generated_position_mean for row in baseline}
-        if evicting and len(positions) > 1 and pstdev(positions.values()) == 0:
-            flags.append("random evicted but every seed retained the same positions: the "
-                         "baseline is not varying and cannot be read as a random draw")
+        # Compared within a task instance, so a spread that is really task variety
+        # cannot be mistaken for the draw varying.
+        by_task: dict[tuple[int, int], list[float]] = {}
+        for row in baseline:
+            by_task.setdefault((row.task_seed, row.example), []).append(
+                row.generated_position_mean)
+        replicated = [positions for positions in by_task.values() if len(positions) > 1]
+        if evicting and replicated and all(pstdev(p) == 0 for p in replicated):
+            flags.append("random evicted but every eviction seed retained the same positions "
+                         "for a given task: the baseline is not varying and cannot be read "
+                         "as a random draw")
     return flags
 
 
@@ -256,6 +294,8 @@ def flat_rows(results: Iterable[CellResult]) -> list[dict]:
                 "method": method.method, "method_key": method.method_key,
                 "metric_mean": method.metric.mean, "metric_stdev": method.metric.stdev,
                 "metric_samples": method.metric.samples,
+                "eviction_stdev": method.eviction_stdev,
+                "eviction_draws": method.eviction_draws,
                 "metric_ci_low": method.metric.ci_low, "metric_ci_high": method.metric.ci_high,
                 "scoring_advantage": None if advantage is None else advantage.mean,
                 "advantage_ci_low": None if advantage is None else advantage.ci_low,

@@ -66,7 +66,12 @@ ARGUMENTS = [
     (["--redundancy"], dict(type=words, default=None,
                             help="prompt-redundancy levels; omit for every level each "
                                  "workload varies")),
-    (["--seeds"], dict(type=ints, default=(0, 1, 2, 3, 4))),
+    (["--task-seeds"], dict(type=ints, default=(0, 1, 2, 3, 4),
+                            help="which task instances to draw: facts, operations, filler "
+                                 "and target")),
+    (["--eviction-seeds"], dict(type=ints, default=(0, 1, 2, 3, 4),
+                                help="draws for the random baseline only; deterministic "
+                                     "methods are decoded once, not once per draw")),
     (["--examples"], dict(type=int, default=1, help="task examples per seed")),
     (["--out"], dict(default="")),
     (["--verbose"], dict(action="store_true")),
@@ -86,7 +91,8 @@ def build_parser(explicit_only=False):
     return parser
 
 
-CONFIG_KEYS = ("model", "workloads", "shapes", "retain", "redundancy", "seeds", "examples")
+CONFIG_KEYS = ("model", "workloads", "shapes", "retain", "redundancy", "task_seeds",
+               "eviction_seeds", "examples")
 
 
 def resolve(argv=None):
@@ -118,7 +124,8 @@ def main():
     result = boundary.sweep(
         args.model, workload_keys=args.workloads, shapes=args.shapes,
         retained_fractions=args.retain, redundancies=args.redundancy,
-        seeds=args.seeds, examples=args.examples)
+        task_seeds=args.task_seeds, eviction_seeds=args.eviction_seeds,
+        examples=args.examples)
     summaries = boundary.summarize(result.rows)
     log.info("\n%s", boundary.format_summary(summaries, "metric"))
     for skip in result.skipped:
@@ -137,7 +144,12 @@ def main():
             "shapes": [list(shape) for shape in args.shapes],
             "retained_fractions": list(args.retain),
             "redundancy": list(args.redundancy) if args.redundancy else "every level per workload",
-            "seeds": list(args.seeds), "examples_per_seed": args.examples,
+            "task_seeds": list(args.task_seeds), "eviction_seeds": list(args.eviction_seeds),
+            "examples_per_task_seed": args.examples,
+            "seed_semantics": "a task seed chooses the facts, operations, filler and target; "
+                              "an eviction seed chooses only what the random baseline throws "
+                              "away. Deterministic methods carry eviction_seed -1 and are "
+                              "decoded once per task instance, never once per draw",
             "budget_semantics": "every method in a cell is held to the same total_budget; "
                                 "generation_budget bounds the generated cache only, so a "
                                 "prompt-protected run holds prompt_length + generation_budget "

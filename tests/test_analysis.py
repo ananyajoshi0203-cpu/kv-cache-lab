@@ -26,12 +26,16 @@ RETAINED = 130.0
 
 def row(*, method_key, metric, seed=0, example=0, task="multistep", redundancy="low",
         generation_length=GENERATION, retained_fraction=0.5, total_retained=RETAINED,
-        generated_retained=10.0, generated_position_mean=150.0, compression_ratio=0.5):
+        generated_retained=10.0, generated_position_mean=150.0, compression_ratio=0.5,
+        eviction_seed=None):
     names = {"full": "Full cache", "random": "Prompt-protected random", "h2o": "H2O",
              "snapkv": "SnapKV"}
+    if eviction_seed is None:
+        eviction_seed = 0 if method_key == "random" else analysis.NO_EVICTION_SEED
     return BoundaryRow(
         model="stub", regime="published", method=names[method_key], method_key=method_key,
-        seed=seed, example=example, task=task, redundancy=redundancy, facts=4, statements=4,
+        task_seed=seed, eviction_seed=eviction_seed,
+        example=example, task=task, redundancy=redundancy, facts=4, statements=4,
         task_metric="final_answer_em", metric_value=metric,
         requested_prompt_length=PROMPT, prompt_length=PROMPT,
         requested_generation_length=generation_length, actual_generation_length=generation_length,
@@ -45,6 +49,7 @@ def row(*, method_key, metric, seed=0, example=0, task="multistep", redundancy="
 
 
 UNITS = [(0, 0), (0, 1), (1, 0), (1, 1), (2, 0), (2, 1)]
+EVICTION_DRAWS = (0, 1, 2)
 
 
 def cell_rows(scored_metrics, baseline_metrics, *, full_metric=1.0, scored_retained=RETAINED,
@@ -120,7 +125,6 @@ def test_every_independent_variable_keeps_its_own_cell(varied):
     ({"full_metric": 0.0}, False, "cannot do this task uncompressed"),
     ({}, True, "no full-cache control"),
     ({"scored_retained": RETAINED + 40}, False, "equal-memory comparison broken"),
-    ({"position_spread": 0.0}, False, "baseline is not varying"),
     ({"compression_ratio": 0.9}, False, "of the cache against a requested"),
 ])
 def test_a_cell_that_cannot_be_read_says_so(overrides, drop_control, expected):
@@ -132,8 +136,14 @@ def test_a_cell_that_cannot_be_read_says_so(overrides, drop_control, expected):
 
 def test_a_healthy_cell_is_not_flagged():
     """The counterpart every check needs: it must fire on the fault and stay quiet
-    otherwise, or it is not a check."""
-    assert analysis.analyse(cell_rows([1] * 6, [0] * 6))[0].flags == ()
+    otherwise, or it is not a check. The baseline here varies across its draws, which
+    is exactly what the frozen-draw check must not complain about."""
+    rows = [r for r in cell_rows([1] * 6, [0] * 6) if r.method_key != "random"]
+    for seed, example in UNITS:
+        rows += [row(method_key="random", metric=0.0, seed=seed, example=example,
+                     eviction_seed=draw, generated_position_mean=150.0 + draw)
+                 for draw in EVICTION_DRAWS]
+    assert analysis.analyse(rows)[0].flags == ()
 
 
 @pytest.mark.parametrize("suffix", [".csv", ".jsonl"])
@@ -143,9 +153,10 @@ def test_rows_survive_a_round_trip_with_their_workload_metadata(tmp_path, suffix
     write_rows(rows, summarize(rows), stem, {})
 
     restored = analysis.load_rows(stem + suffix)
-    assert [(r.task, r.redundancy, r.method_key, r.metric_value, r.seed, r.example)
-            for r in restored] == [
-        (r.task, r.redundancy, r.method_key, r.metric_value, r.seed, r.example) for r in rows]
+    assert [(r.task, r.redundancy, r.method_key, r.metric_value, r.task_seed,
+             r.eviction_seed, r.example) for r in restored] == [
+        (r.task, r.redundancy, r.method_key, r.metric_value, r.task_seed,
+         r.eviction_seed, r.example) for r in rows]
     assert analysis.analyse(restored)[0].workload == "needle"
     assert analysis.analyse(restored)[0].redundancy == "high"
 
@@ -159,3 +170,41 @@ def test_every_figure_is_drawn_from_saved_records(tmp_path):
     assert len(written) == len(plots.PLOTS)
     assert all(os.path.getsize(path) > 0 for path in written)
     assert {os.path.basename(p)[0] for p in written} == {"A", "B", "C", "D"}
+
+
+def test_eviction_draws_are_averaged_inside_a_task_instance_not_pooled_with_it():
+    """Nesting, not crossing. Pooling draws with task instances would let the baseline
+    look three times more precisely measured than the deterministic method it is being
+    compared against, which is a property of the sweep and not of the method."""
+    per_draw = {0: 1.0, 1: 0.0, 2: 0.0}      # the same task, three different draws
+    rows = [row(method_key="full", metric=1.0, seed=s, example=e) for s, e in UNITS]
+    for seed, example in UNITS:
+        rows.append(row(method_key="h2o", metric=1.0, seed=seed, example=example))
+        rows += [row(method_key="random", metric=metric, seed=seed, example=example,
+                     eviction_seed=draw, generated_position_mean=150.0 + draw)
+                 for draw, metric in per_draw.items()]
+
+    results = analysis.analyse(rows)
+    baseline, scored = only(results, "random"), only(results, "h2o")
+
+    assert baseline.metric.samples == len(UNITS), "one sample per task, not per draw"
+    assert baseline.metric.mean == pytest.approx(sum(per_draw.values()) / len(per_draw))
+    assert baseline.eviction_draws == len(per_draw)
+    assert baseline.eviction_stdev > 0, "the draw moved, and the spread says so"
+    # The scored method is deterministic given the task and must not claim draws.
+    assert scored.eviction_draws == 0 and scored.eviction_stdev == 0
+    assert scored.scoring_advantage.mean == pytest.approx(
+        1.0 - sum(per_draw.values()) / len(per_draw))
+
+
+def test_a_baseline_whose_draws_never_move_is_flagged_within_its_task():
+    """Checked inside a task instance: across tasks the position mean moves anyway,
+    so a cross-task comparison would hide a frozen draw."""
+    rows = [row(method_key="full", metric=1.0, seed=s, example=e) for s, e in UNITS]
+    for seed, example in UNITS:
+        rows.append(row(method_key="h2o", metric=1.0, seed=seed, example=example))
+        rows += [row(method_key="random", metric=0.0, seed=seed, example=example,
+                     eviction_seed=draw, generated_position_mean=150.0 + seed)
+                 for draw in EVICTION_DRAWS]
+
+    assert any("not varying" in flag for flag in analysis.analyse(rows)[0].flags)
