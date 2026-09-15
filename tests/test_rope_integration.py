@@ -12,7 +12,8 @@ link of that argument against an oracle computed a different way:
   (exact equality is only possible if gathered keys keep their positions);
 - ragged per-layer budgets run end-to-end through mask fitting;
 - a prompt-protected random cache decodes at prompt + generation budget,
-  which is the size its budget actually names.
+  which is the size its budget actually names;
+- every method's provenance accounting balances against the cache it really held.
 
 Requires downloading a few-MB test model; skipped when that fails.
 """
@@ -25,10 +26,11 @@ import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
+from kvlab.accounting import CacheLedger                            # noqa: E402
 from kvlab.benchmark import _score                                  # noqa: E402
 from kvlab.decode import generate_stepwise                          # noqa: E402
 from kvlab.methods import (                                         # noqa: E402
-    CAKE, FullCache, PromptProtectedRandom, _gather_tokens,
+    CAKE, FullCache, PromptProtectedRandom, _gather_tokens, build,
 )
 from kvlab.model import cache_to_tuples, load_model, per_layer_mask_fit, tuples_to_cache  # noqa: E402
 
@@ -153,3 +155,29 @@ def test_prompt_protected_random_decodes_at_prompt_plus_generation_budget(llama)
     assert [lengths[0] for lengths in observed] == [
         SEQ + min(budget, generated + 1) for generated in range(steps - 1)]
     assert all(len(set(lengths)) == 1 for lengths in observed), "layers must stay uniform"
+
+
+@pytest.mark.parametrize("key, kwargs, protects_the_prompt", [
+    ("full", {}, True),
+    ("random", {"generation_budget": 4, "seed": 0}, True),
+    ("h2o", {"budget": SEQ // 2, "recent": 4}, False),
+    ("snapkv", {"budget": SEQ // 2, "window": 4}, False),
+    ("cake", {"budget": SEQ // 2, "window": 4}, False),
+    ("obcache", {"budget": SEQ // 2, "recent": 4}, False),
+])
+def test_provenance_balances_for_every_method(llama, key, kwargs, protects_the_prompt):
+    """The ledger runs against real caches here, not scripted ones: it has to
+    balance for a per-head random draw and a ragged per-layer budget alike, and
+    only the prompt-protected methods may come back holding the whole prompt."""
+    model, _, cfg, ids = llama
+    steps = 8
+    ledger = CacheLedger()
+    generate_stepwise(model, ids, build(key, **kwargs), max_new_tokens=steps, ledger=ledger)
+    account = ledger.account(cfg)
+
+    assert account.prompt_length == SEQ
+    # The final generated token's KV never enters the cache: nothing attends to it.
+    assert account.generated_length == steps - 1
+    assert account.total_retained == account.prompt_retained + account.generated_retained
+    assert (account.prompt_retained == SEQ) is protects_the_prompt
+    assert account.total_kv_bytes <= account.uncompressed_kv_bytes
