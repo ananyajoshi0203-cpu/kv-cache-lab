@@ -1,0 +1,48 @@
+{
+  "model": "distilgpt2",
+  "layers": 6,
+  "kv_heads": 12,
+  "head_dim": 64,
+  "workloads": [
+    "needle",
+    "multistep"
+  ],
+  "workload_notes": {
+    "needle": "passkey retrieval, a prompt-retention probe; the answer is emitted within the first generated tokens, so a budget over the generated cache cannot move it",
+    "multistep": "a fact chain whose later operands exist only in the generated trace, scored on the last integer written and on nothing about the reasoning"
+  },
+  "shapes": [
+    [
+      128,
+      64
+    ],
+    [
+      384,
+      96
+    ]
+  ],
+  "retained_fractions": [
+    0.3,
+    0.6,
+    0.9
+  ],
+  "redundancy": "every level per workload",
+  "seeds": [
+    0,
+    1,
+    2
+  ],
+  "examples_per_seed": 2,
+  "budget_semantics": "every method in a cell is held to the same total_budget; generation_budget bounds the generated cache only, so a prompt-protected run holds prompt_length + generation_budget and the two numbers are never interchanged",
+  "kv_bytes_kind": "analytical",
+  "decode_wall_seconds_note": "Python-level wall clock, for bookkeeping only; not a throughput measurement",
+  "torch": "2.14.0",
+  "transformers": "5.17.0",
+  "skip_counts": {
+    "a protected prompt does not fit the target: keeping the whol...": 36,
+    "an after-prefill press cannot reach the target: it compresse...": 6,
+    "votes with an observation window of prompt queries; once the...": 54,
+    "the workload cannot build a prompt near this length: its evi...": 72
+  },
+  "rows": 120
+}
