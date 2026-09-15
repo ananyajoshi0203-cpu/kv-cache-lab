@@ -10,7 +10,9 @@ link of that argument against an oracle computed a different way:
 - the step-wise decode loop == model.generate, token for token;
 - an evicted cache == the full cache with the same tokens hidden by a 4D mask
   (exact equality is only possible if gathered keys keep their positions);
-- ragged per-layer budgets run end-to-end through mask fitting.
+- ragged per-layer budgets run end-to-end through mask fitting;
+- a prompt-protected random cache decodes at prompt + generation budget,
+  which is the size its budget actually names.
 
 Requires downloading a few-MB test model; skipped when that fails.
 """
@@ -25,7 +27,9 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kvlab.benchmark import _score                                  # noqa: E402
 from kvlab.decode import generate_stepwise                          # noqa: E402
-from kvlab.methods import CAKE, FullCache, _gather_tokens           # noqa: E402
+from kvlab.methods import (                                         # noqa: E402
+    CAKE, FullCache, PromptProtectedRandom, _gather_tokens,
+)
 from kvlab.model import cache_to_tuples, load_model, per_layer_mask_fit, tuples_to_cache  # noqa: E402
 
 TINY_LLAMA = "hf-internal-testing/tiny-random-LlamaForCausalLM"
@@ -128,3 +132,24 @@ def test_ragged_budgets_decode_on_rope(llama):
     assert len(set(layer_budgets)) >= 1 and sum(layer_budgets) == 16 * len(layer_budgets)
     assert tokens.shape[1] == 4
     assert ((tokens >= 0) & (tokens < model.config.vocab_size)).all()
+
+
+def test_prompt_protected_random_decodes_at_prompt_plus_generation_budget(llama):
+    """End-to-end on a real cache: the budget bounds the generated half only, so
+    the cache settles at SEQ + budget positions and not at budget."""
+    model, _, _, ids = llama
+    budget, steps = 6, 10
+    observed = []
+
+    class Recording(PromptProtectedRandom):
+        def step(self, past_key_values, attentions):
+            out = super().step(past_key_values, attentions)
+            observed.append([k.shape[2] for k, _ in out])
+            return out
+
+    tokens = generate_stepwise(model, ids, Recording(generation_budget=budget, seed=0),
+                               max_new_tokens=steps)
+    assert tokens.shape[1] == steps
+    assert [lengths[0] for lengths in observed] == [
+        SEQ + min(budget, generated + 1) for generated in range(steps - 1)]
+    assert all(len(set(lengths)) == 1 for lengths in observed), "layers must stay uniform"
