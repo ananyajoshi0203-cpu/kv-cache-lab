@@ -4,7 +4,9 @@
 about nothing else.** It exists to show that the workloads build, the runner sweeps,
 results serialize, the analysis reads them back and the figures draw.
 
-720 rows, 36 cells, 6 units per cell (3 seeds x 2 examples), 14 figures.
+1296 rows, 36 cells, 6 task instances per cell (3 task seeds x 2 examples), 3 eviction
+draws for each stochastic method, 14 figures. The preflight ran first and is recorded
+in `run_config.json`.
 
 ## What it confirms, and what it does not
 
@@ -15,6 +17,12 @@ mistake the check exists to prevent.
 
 `needle` it can do, so those cells carry the only interpretable numbers here, and even
 those are a two-shape CPU run at three retained fractions. They are not a result.
+
+The trace ablation is flagged unseparable in five cells: a distilgpt2 trace holds very
+few numeric positions, so the numeric arm exhausts its class and spills into the other
+one, at which point both arms remove mostly the same positions. That is the guard
+working. It is also the reason the intervention belongs at mild compression, and the
+reason a null between the arms here would mean nothing.
 
 ## Files
 

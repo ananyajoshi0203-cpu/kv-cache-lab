@@ -7,6 +7,16 @@
     "needle",
     "multistep"
   ],
+  "methods": [
+    "full",
+    "random",
+    "h2o",
+    "snapkv",
+    "cake",
+    "obcache",
+    "ablate-numeric",
+    "ablate-other"
+  ],
   "workload_notes": {
     "needle": "passkey retrieval, a prompt-retention probe; the answer is emitted within the first generated tokens, so a budget over the generated cache cannot move it",
     "multistep": "a fact chain whose later operands exist only in the generated trace, scored on the last integer written and on nothing about the reasoning"
@@ -27,22 +37,56 @@
     0.9
   ],
   "redundancy": "every level per workload",
-  "seeds": [
+  "task_seeds": [
     0,
     1,
     2
   ],
-  "examples_per_seed": 2,
+  "eviction_seeds": [
+    0,
+    1,
+    2
+  ],
+  "examples_per_task_seed": 2,
+  "seed_semantics": "a task seed chooses the facts, operations, filler and target; an eviction seed chooses only what the random baseline throws away. Deterministic methods carry eviction_seed -1 and are decoded once per task instance, never once per draw",
   "budget_semantics": "every method in a cell is held to the same total_budget; generation_budget bounds the generated cache only, so a prompt-protected run holds prompt_length + generation_budget and the two numbers are never interchanged",
   "kv_bytes_kind": "analytical",
+  "preflight": {
+    "context_limit": 1024,
+    "prompt_floors": {
+      "needle/none": 13,
+      "multistep/low": 115,
+      "multistep/medium": 165,
+      "multistep/high": 265
+    },
+    "floors_measured_with": "the tokenizer of distilgpt2",
+    "shapes_holding_every_redundancy_level": {
+      "needle": [
+        [
+          128,
+          64
+        ],
+        [
+          384,
+          96
+        ]
+      ],
+      "multistep": [
+        [
+          384,
+          96
+        ]
+      ]
+    }
+  },
   "decode_wall_seconds_note": "Python-level wall clock, for bookkeeping only; not a throughput measurement",
   "torch": "2.14.0",
   "transformers": "5.17.0",
   "skip_counts": {
-    "a protected prompt does not fit the target: keeping the whol...": 36,
-    "an after-prefill press cannot reach the target: it compresse...": 6,
-    "votes with an observation window of prompt queries; once the...": 54,
-    "the workload cannot build a prompt near this length: its evi...": 72
+    "a protected prompt does not fit the target: keeping the whole prompt a...": 84,
+    "an after-prefill press cannot reach the target: it compresses the prom...": 6,
+    "votes with an observation window of prompt queries; once the prompt is...": 54,
+    "the workload cannot build a prompt near this length: its evidence and ...": 96
   },
-  "rows": 120
+  "summary_cells": 144
 }

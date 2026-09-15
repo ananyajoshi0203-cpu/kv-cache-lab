@@ -62,7 +62,7 @@ from .boundary import BoundaryRow
 
 logger = logging.getLogger(__name__)
 
-RESAMPLING_UNIT = "one (seed, example) pair"
+RESAMPLING_UNIT = "one (task_seed, example) pair; eviction draws are averaged inside it"
 BOOTSTRAP_REPLICATES = 2000
 CONFIDENCE = 0.95
 #: Retained KV is counted in whole positions per layer per head, so two methods that
