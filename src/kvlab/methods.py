@@ -17,6 +17,14 @@ class KVMethod:
     family = "-"
     lever = "-"
     bits = 16
+    phase = "after-prefill"
+
+    #: Indices this method last gathered with, per layer, [batch, kv_heads, kept],
+    #: relative to the cache it was handed. None means nothing was dropped. A
+    #: method publishes these so an outside observer (kvlab.accounting.CacheLedger)
+    #: can follow where each surviving position came from without the method
+    #: keeping any provenance state of its own.
+    last_indices: tuple | None = None
 
     def apply(self, past_key_values, attentions):
         raise NotImplementedError
@@ -25,6 +33,7 @@ class KVMethod:
         """Called after each decode step with the grown cache and that step's
         attentions. Prefill-only methods leave the cache alone; decoding-phase
         methods (online H2O, MorphKV) evict here."""
+        self.last_indices = None
         return past_key_values
 
     def kept_len(self, orig_len: int) -> int:
@@ -76,11 +85,16 @@ def _gather_tokens(tensor, idx):
     return tensor.gather(2, idx.unsqueeze(-1).expand(*idx.shape, tensor.shape[-1]))
 
 
-def _evict(key, value, scores, budget, recent):
+def _evict_tracked(key, value, scores, budget, recent):
+    """`_evict`, plus the indices it kept, so a caller can record provenance."""
     idx = _evict_indices(scores, budget, recent)
     if idx is None:
-        return key, value
-    return _gather_tokens(key, idx), _gather_tokens(value, idx)
+        return key, value, None
+    return _gather_tokens(key, idx), _gather_tokens(value, idx), idx
+
+
+def _evict(key, value, scores, budget, recent):
+    return _evict_tracked(key, value, scores, budget, recent)[:2]
 
 
 def _fake_quant(x, bits, reduce_dim):
@@ -96,9 +110,97 @@ def _fake_quant(x, bits, reduce_dim):
 
 class FullCache(KVMethod):
     key, name, family, lever, bits = "full", "Full cache", "Baseline", "none", 16
+    phase = "none"
 
     def apply(self, past_key_values, attentions):
+        self.last_indices = None
         return past_key_values
+
+
+class PromptProtectedRandom(KVMethod):
+    """Random Attention (arXiv:2609.03430): keep the prompt, evict the generated
+    cache uniformly at random, compute no score anywhere. It is the control the
+    rest of this repository is measured against -- if a scorer cannot beat a
+    coin flip that was told only "do not touch the prompt", its selection signal
+    is not what is doing the work.
+
+    Budget semantics, which are the whole point of the class. `generation_budget`
+    bounds the *generated* half of the cache only. The cache this method holds is
+
+        prompt_length + generation_budget
+
+    positions, so a generated-token budget and a total-token budget are different
+    quantities and this harness never converts between them implicitly. See
+    kvlab.boundary.Budget, which carries both and is explicit about which one a
+    given comparison holds fixed.
+
+    Granularity. The paper draws "uniformly at random within each attention head".
+    A HuggingFace cache stores one entry per *KV* head, which is the finest
+    granularity any draw over it can have: on an MHA model (kv_heads == n_heads,
+    which includes distilgpt2 and GPT-2) this is exactly the paper's per-head
+    draw, and under GQA the query heads sharing a KV head necessarily share its
+    draw. Layers draw independently, as do decode steps.
+
+    Eviction is irreversible, so each step draws over the generated positions
+    still in the cache rather than over every position ever generated -- evicting
+    uniformly at random from the live pool, which is what the paper describes.
+    The paper specifies no recency window and none is added here.
+    """
+
+    key, name, family, lever, bits = "random", "Prompt-protected random", "Eviction", "context", 16
+    phase = "decoding"
+
+    def __init__(self, generation_budget: int = 128, seed: int = 0):
+        if generation_budget < 0:
+            raise ValueError(f"generation_budget must be non-negative, got {generation_budget}")
+        self.generation_budget = generation_budget
+        self.seed = seed
+        self.prompt_length: int | None = None
+        self._generator = torch.Generator()
+
+    def apply(self, past_key_values, attentions):
+        """Prefill leaves the cache alone: it is all prompt, and the prompt is
+        protected. Recording its length here is what makes the protection
+        possible, and reseeding here makes a reused instance reproducible."""
+        self.prompt_length = past_key_values[0][0].shape[2]
+        self._generator.manual_seed(self.seed)
+        self.last_indices = None
+        return past_key_values
+
+    def step(self, past_key_values, attentions):
+        if self.prompt_length is None:
+            raise RuntimeError("apply() must run on the prefilled cache before step(); "
+                               "without it the method does not know where the prompt ends")
+        out, indices = [], []
+        for k, v in past_key_values:
+            idx = self._draw(k)
+            indices.append(idx)
+            out.append((k, v) if idx is None else (_gather_tokens(k, idx), _gather_tokens(v, idx)))
+        self.last_indices = tuple(indices)
+        return tuple(out)
+
+    def _draw(self, key):
+        """Kept indices [batch, kv_heads, prompt_length + generation_budget] in
+        chronological order, or None while the generated cache is within budget."""
+        batch, heads, seq = key.shape[:3]
+        protected = min(self.prompt_length, seq)
+        pool = seq - protected
+        if pool <= self.generation_budget:
+            return None
+        draws = [torch.randperm(pool, generator=self._generator)[: self.generation_budget].sort().values
+                 for _ in range(batch * heads)]
+        generated = protected + torch.stack(draws).view(batch, heads, self.generation_budget)
+        prompt = torch.arange(protected).view(1, 1, protected).expand(batch, heads, protected)
+        return torch.cat([prompt, generated], dim=-1).to(key.device)
+
+    def kept_len(self, orig_len: int) -> int:
+        """`orig_len` is read as a total sequence length: prompt plus generated.
+        Before apply() has seen a prefill there is no prompt boundary to protect,
+        so nothing is dropped."""
+        if self.prompt_length is None:
+            return orig_len
+        generated = max(0, orig_len - self.prompt_length)
+        return self.prompt_length + min(self.generation_budget, generated)
 
 
 class H2O(KVMethod):
@@ -107,6 +209,7 @@ class H2O(KVMethod):
     reshape the cache) and each step evicts back down to the budget."""
 
     key, name, family, lever, bits = "h2o", "H2O", "Eviction", "context", 16
+    phase = "decoding"
 
     def __init__(self, budget=128, recent=32):
         self.budget, self.recent = budget, recent
@@ -115,28 +218,32 @@ class H2O(KVMethod):
     def _evict_layer(self, k, v, scores):
         idx = _evict_indices(scores, self.budget, self.recent)
         if idx is None:
-            return (k, v), scores
-        return (_gather_tokens(k, idx), _gather_tokens(v, idx)), scores.gather(-1, idx)
+            return (k, v), scores, None
+        return (_gather_tokens(k, idx), _gather_tokens(v, idx)), scores.gather(-1, idx), idx
 
     def apply(self, past_key_values, attentions):
-        out, self._acc = [], []
+        out, self._acc, indices = [], [], []
         for (k, v), attn in zip(past_key_values, attentions):
-            kv, acc = self._evict_layer(k, v, _key_scores(attn, k.shape[1]))
+            kv, acc, idx = self._evict_layer(k, v, _key_scores(attn, k.shape[1]))
             out.append(kv)
             self._acc.append(acc)
+            indices.append(idx)
+        self.last_indices = tuple(indices)
         return tuple(out)
 
     def step(self, past_key_values, attentions):
-        out, acc_next = [], []
+        out, acc_next, indices = [], [], []
         for i, ((k, v), attn) in enumerate(zip(past_key_values, attentions)):
             scores = _key_scores(attn, k.shape[1])
             if self._acc is not None:
                 prev = self._acc[i]
                 scores[..., : prev.shape[-1]] += prev
-            kv, acc = self._evict_layer(k, v, scores)
+            kv, acc, idx = self._evict_layer(k, v, scores)
             out.append(kv)
             acc_next.append(acc)
+            indices.append(idx)
         self._acc = acc_next
+        self.last_indices = tuple(indices)
         return tuple(out)
 
     def kept_len(self, orig_len):
@@ -154,12 +261,15 @@ class SnapKV(KVMethod):
         self.budget, self.window, self.pool = budget, window, pool
 
     def apply(self, past_key_values, attentions):
-        out = []
+        out, indices = [], []
         for (k, v), attn in zip(past_key_values, attentions):
             scores = _key_scores(attn, k.shape[1], self.window)
             if self.pool > 1:
                 scores = _pool_scores(scores, self.pool)
-            out.append(_evict(k, v, scores, self.budget, self.window))
+            ek, ev, idx = _evict_tracked(k, v, scores, self.budget, self.window)
+            out.append((ek, ev))
+            indices.append(idx)
+        self.last_indices = tuple(indices)
         return tuple(out)
 
     def kept_len(self, orig_len):
@@ -180,10 +290,13 @@ class OBCache(KVMethod):
         self.budget, self.recent = budget, recent
 
     def apply(self, past_key_values, attentions):
-        out = []
+        out, indices = [], []
         for (k, v), attn in zip(past_key_values, attentions):
             scores = _key_scores(attn, k.shape[1]) * v.norm(dim=-1)
-            out.append(_evict(k, v, scores, self.budget, self.recent))
+            ek, ev, idx = _evict_tracked(k, v, scores, self.budget, self.recent)
+            out.append((ek, ev))
+            indices.append(idx)
+        self.last_indices = tuple(indices)
         return tuple(out)
 
     def kept_len(self, orig_len):
@@ -247,12 +360,15 @@ class CAKE(KVMethod):
         preferences = [self._preference(attn) for attn in attentions]
         lens = [k.shape[2] for k, _ in past_key_values]
         self._layer_budgets = self._allocate(preferences, lens)
-        out = []
+        out, indices = [], []
         for (k, v), attn, layer_budget in zip(past_key_values, attentions, self._layer_budgets):
             scores = _key_scores(attn, k.shape[1], self.window)
             if self.pool > 1:
                 scores = _pool_scores(scores, self.pool)
-            out.append(_evict(k, v, scores, layer_budget, self.window))
+            ek, ev, idx = _evict_tracked(k, v, scores, layer_budget, self.window)
+            out.append((ek, ev))
+            indices.append(idx)
+        self.last_indices = tuple(indices)
         return tuple(out)
 
     def kept_len(self, orig_len):
@@ -273,12 +389,14 @@ class KIVIQuant(KVMethod):
     numbers require a genuine quantized-cache backend (KVPressQuantBackend)."""
 
     key, name, family, lever = "kivi", "KIVI fake-quant", "Compression", "dtype"
+    phase = "none"
 
     def __init__(self, bits=2, residual=16):
         self.bits = bits
         self.residual = residual
 
     def apply(self, past_key_values, attentions):
+        self.last_indices = None
         out = []
         for k, v in past_key_values:
             S = k.shape[2]
@@ -294,8 +412,8 @@ class KIVIQuant(KVMethod):
         return per_elem * ((orig_len - r) * self.bits / 8.0 + r * 2.0)
 
 
-_IMPLEMENTED = {"full": FullCache, "h2o": H2O, "snapkv": SnapKV, "cake": CAKE,
-                "obcache": OBCache, "kivi": KIVIQuant}
+_IMPLEMENTED = {"full": FullCache, "random": PromptProtectedRandom, "h2o": H2O,
+                "snapkv": SnapKV, "cake": CAKE, "obcache": OBCache, "kivi": KIVIQuant}
 
 
 def build(key: str, **kwargs) -> KVMethod:

@@ -32,6 +32,11 @@ class Method:
 
 REGISTRY: list[Method] = [
     # Eviction
+    Method("random", "Prompt-protected random", "Eviction", "context", "implemented",
+           "Keep the prompt, evict the generated cache uniformly at random within each head, "
+           "score nothing. The control for every scored evictor: its budget is stated over "
+           "generated tokens, not over the whole cache.",
+           "arXiv:2609.03430", "Decoding"),
     Method("h2o", "H2O", "Eviction", "context", "implemented",
            "Retain recent tokens plus the highest accumulated-attention tokens; evict the rest.",
            "arXiv:2306.14048", "Decoding", "ObservedAttentionPress"),

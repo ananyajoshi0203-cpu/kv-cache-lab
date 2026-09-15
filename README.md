@@ -71,6 +71,99 @@ perplexity while silently ignoring instructions. That failure mode is documented
 *The Pitfalls of KV Cache Compression* and is the reason IFEval is part of the
 benchmark set rather than perplexity alone.
 
+## The boundary experiment
+
+Every evictor here is a scoring function, which means the harness cannot answer
+whether the scores are what is doing the work. *Random Attention*
+([arXiv:2609.03430](https://arxiv.org/abs/2609.03430)) reports that keeping the
+prompt and then evicting uniformly at random within each head matches the strongest
+scored evictor. That makes a score-free method the control the others have to beat,
+and it makes one question worth answering before any new method is worth proposing:
+**where does score-free eviction stop being enough?**
+
+`examples/run_boundary_sweep.py` sweeps prompt length, generation length and the
+retained fraction of the cache to find that crossing. It is not a new method and it
+does not try to be.
+
+### The budget is the part that is easy to get wrong
+
+`PromptProtectedRandom` takes a budget over the **generated** cache; H2O takes one
+over the **whole** cache; SnapKV, CAKE and OBCache take one over the **prompt** and
+then let the cache grow with every generated token. Hand all of them the number 128
+and they hold three different amounts of memory, and the one that quietly holds the
+most looks like it won.
+
+So the sweep controls the one thing that is comparable: the **final cache size**.
+Each method is then given whatever budget reaches it, derived separately and
+recorded per row.
+
+<dl>
+<dt>H2O</dt><dd>budget = target (it bounds the whole cache at every step)</dd>
+<dt>SnapKV, CAKE, OBCache</dt><dd>budget = target − generated tokens (it only ever
+compresses the prompt, then accumulates)</dd>
+<dt>Prompt-protected random</dt><dd>budget = target − prompt length (it refuses to
+touch the prompt)</dd>
+</dl>
+
+Where a method has no budget that reaches the target, the cell is **skipped with a
+reason** rather than fudged into the table, and two of those skips are results in
+their own right:
+
+- Below a retained fraction that holds the whole prompt, a prompt-protected method
+  has no feasible configuration at all. On a 192-token prompt with 32 generated
+  tokens that floor is 0.86, so the method cannot be run over most of the
+  compression range. This is the honest form of "the protected prompt makes total
+  memory differ", and it is why an iso-total-memory claim is never made on its
+  behalf.
+- An after-prefill press cannot reach a target smaller than the generated tokens it
+  accumulates. With a 128-token prompt and 384 generated tokens, SnapKV, CAKE and
+  OBCache have no configuration at any interesting compression ratio, because they
+  never touch the generated cache at all — exactly the regime long reasoning traces
+  live in.
+
+### Two regimes
+
+**Published** runs every method as its paper defines it. The prompt/generated split
+in the accounting columns is what to read: at equal memory, how much of each cache
+went to the prompt.
+
+**Prompt-protected** wraps methods so the prompt is untouchable and the target is
+spent on the generated cache alone, isolating what the score bought from whether
+the score happened to keep the prompt. A wrapped method is reported under its own
+key (`pp-h2o`) and its own name, never under the published one.
+
+SnapKV, CAKE and OBCache have **no prompt-protected form** here, and that is a
+finding rather than an omission: they vote with an observation window of prompt
+queries, and once the prompt is protected only the single query of one decode step
+remains. A scorer reading one query is a different scorer wearing the same name.
+Giving them a faithful decode-time form is method design, which this phase
+deliberately does not do.
+
+### What is measured
+
+Retrieval accuracy, not perplexity — the repository already knows perplexity hides
+the failure eviction actually causes. Alongside it, every row carries prompt KV,
+generated KV and total KV retained, the analytical KV bytes behind them, the
+compression ratio, and the nominal budget that method was handed. Seeds 0–4 are
+swept and the summary reports mean and dispersion, because one lucky draw of a
+random method is not a result and neither is one unlucky one.
+
+Two things the numbers do **not** claim. The byte figures are **analytical** — slot
+counts multiplied through the cost model, never allocator readings — and the
+per-row wall clock is Python-level bookkeeping, not a throughput measurement.
+
+```bash
+python examples/run_boundary_sweep.py --prompts 128,384 --gen 64,384 \
+    --retain 0.2,0.35,0.5,0.75,0.9 --out results/boundary
+```
+
+The passkey workload has one limitation worth stating up front: the model answers
+within the first few generated tokens, so a budget over the *generated* cache
+cannot move that score. Making the generated axis bite needs a workload whose
+answer depends on its own trace (reasoning, multi-instruction), which is why
+`Workload` is a two-function interface — adding one is adding a `Workload`, not
+editing the runner.
+
 ## Architecture
 
 ```
@@ -80,8 +173,11 @@ kv-cache-lab/
     registry.py     methods by family and lever, mapped to KVPress presses
     scenarios.py    deployment scenarios and the methods that fit them
     backends.py     ReferenceBackend (in-repo) and KVPressBackend (NVIDIA KVPress)
-    methods.py      reference implementations of H2O, SnapKV, OBCache, CAKE, KIVI
+    methods.py      reference implementations of prompt-protected random, H2O,
+                    SnapKV, OBCache, CAKE, KIVI
     decode.py       step-wise decode loop with a per-step method hook
+    accounting.py   prompt KV vs generated KV, and the analytical bytes behind them
+    boundary.py     the boundary sweep: one target cache, a budget per method
     evals.py        standard benchmarks (RULER, LongBench, SCBench, IFEval)
     needle.py       passkey retrieval eval, runnable on CPU
     benchmark.py    iso-ratio runner with CSV/JSON output
@@ -119,6 +215,13 @@ control):
 python examples/run_needle.py --method snapkv --ratios 0,0.5,0.75
 ```
 
+The boundary sweep asks where a score starts to beat a coin flip, holding every
+method to the same final cache size:
+
+```bash
+python examples/run_boundary_sweep.py --prompts 128,384 --gen 64,384 --out results/boundary
+```
+
 For real long-context methods, use KVPress through the same interface:
 
 ```python
@@ -154,10 +257,15 @@ perplexity benchmark and the passkey retrieval eval. The harness runs on
 transformers 5. Wired and ready for a GPU host: the KVPress backend (including
 KVzip, a strong published multi-turn baseline) and the benchmark catalog.
 
-The iso-ratio accounting covers retained KV storage. Scorer side-state (H2O's
-accumulated statistics, quantization scales) is not yet counted; it is negligible
-for the current methods but must be counted for any method that keeps per-chunk
-metadata.
+`accounting.py` splits retained KV into prompt and generated, which the iso-ratio
+accounting cannot: methods now publish the indices they gathered with, and a
+`CacheLedger` composes those across decode steps to recover each surviving
+position's index in the original sequence. It refuses to guess when a method
+reshapes the cache without publishing what it did.
+
+Both accountings cover retained KV storage. Scorer side-state (H2O's accumulated
+statistics, quantization scales) is not yet counted; it is negligible for the
+current methods but must be counted for any method that keeps per-chunk metadata.
 
 Trained eviction methods (LookaheadKV, ForesightKV) are catalogued with their
 published numbers rather than reimplemented, and hybrid-memory and
@@ -170,8 +278,9 @@ compare families, not papers.
 ## References
 
 See [REFERENCES.md](REFERENCES.md) for the full list. Core sources: the survey
-(arXiv:2603.20397), the pitfalls paper (arXiv:2510.00231), and KVPress
-(arXiv:2510.00636).
+(arXiv:2603.20397), the pitfalls paper (arXiv:2510.00231), KVPress
+(arXiv:2510.00636), and Random Attention (arXiv:2609.03430), which the boundary
+experiment exists to test rather than to extend.
 
 ## License
 
