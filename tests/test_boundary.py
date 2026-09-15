@@ -1,0 +1,189 @@
+"""Budget arithmetic and prompt protection for the boundary sweep.
+
+The sweep's whole claim to being controlled is that every method in a cell ends up
+holding the same cache, reached by a budget derived separately for each because the
+methods bound different things. These tests pin that derivation against a table
+worked out by hand, pin the two ways a method can have no feasible configuration at
+all, and pin the wrapper that holds a prompt out of a scorer's reach.
+
+Nothing here loads a model: the arithmetic and the wrapper are exactly the parts
+that must be right before a single GPU-second is spent. The end-to-end run is
+covered in test_rope_integration. Run: `pytest tests/`.
+"""
+
+import os
+import sys
+
+import pytest
+import torch
+
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
+
+from kvlab.boundary import (                                          # noqa: E402
+    NO_PROMPT_PROTECTED_FORM, UNREACHABLE_BY_PRESS, UNREACHABLE_BY_PROTECTION,
+    BoundaryRow, Budget, PromptProtected, Regime, Summary, method_for, summarize, write_rows,
+)
+from kvlab.methods import H2O, SnapKV                                 # noqa: E402
+
+PROMPT, GENERATION = 100, 51        # 50 generated positions ever reach the cache
+FULL = PROMPT + GENERATION - 1
+BATCH, HEADS, DIM = 1, 3, 2
+
+
+@pytest.mark.parametrize("fraction, total, generation_budget, h2o, press, random_budget", [
+    # fraction   total  gen_budget  h2o  press  random
+    (1.00,        150,          50,  150,   100,     50),
+    (0.80,        120,          20,  120,    70,     20),
+    # The target no longer fits a protected prompt, but a press still reaches it
+    # by compressing the prompt to 25.
+    (0.50,         75,         -25,   75,    25,   None),
+    # Now even compressing the prompt to nothing leaves the press over target,
+    # because it accumulates all 50 generated positions regardless.
+    (0.20,         30,         -70,   30,  None,   None),
+])
+def test_one_target_becomes_a_different_budget_for_every_method(
+        fraction, total, generation_budget, h2o, press, random_budget):
+    budget = Budget(PROMPT, GENERATION, fraction)
+    assert budget.cached_generation_length == GENERATION - 1
+    assert budget.full_length == FULL
+    assert budget.total_budget == total
+    assert budget.generation_budget == generation_budget
+
+    assert budget.nominal_for("h2o", Regime.PUBLISHED)[0] == h2o
+    assert budget.nominal_for("snapkv", Regime.PUBLISHED)[0] == press
+    assert budget.nominal_for("random", Regime.PUBLISHED)[0] == random_budget
+    # Under protection every method takes the generated-cache framing, h2o included.
+    assert budget.nominal_for("h2o", Regime.PROMPT_PROTECTED)[0] == random_budget
+
+
+@pytest.mark.parametrize("key, regime, fraction, reason", [
+    ("random", Regime.PUBLISHED, 0.5, UNREACHABLE_BY_PROTECTION),
+    ("h2o", Regime.PROMPT_PROTECTED, 0.5, UNREACHABLE_BY_PROTECTION),
+    ("snapkv", Regime.PUBLISHED, 0.2, UNREACHABLE_BY_PRESS),
+    ("snapkv", Regime.PROMPT_PROTECTED, 1.0, NO_PROMPT_PROTECTED_FORM["snapkv"]),
+    ("cake", Regime.PROMPT_PROTECTED, 1.0, NO_PROMPT_PROTECTED_FORM["cake"]),
+    ("obcache", Regime.PROMPT_PROTECTED, 1.0, NO_PROMPT_PROTECTED_FORM["obcache"]),
+])
+def test_an_unreachable_cell_gives_a_reason_not_a_method(key, regime, fraction, reason):
+    chosen = method_for(regime, key, Budget(PROMPT, GENERATION, fraction), seed=0)
+    assert chosen == reason
+
+
+@pytest.mark.parametrize("key, regime, expected_key, nominal, window", [
+    ("h2o", Regime.PUBLISHED, "h2o", 150, 37),
+    ("h2o", Regime.PROMPT_PROTECTED, "pp-h2o", 50, 12),
+    ("snapkv", Regime.PUBLISHED, "snapkv", 100, 25),
+    ("random", Regime.PUBLISHED, "random", 50, 0),
+    ("full", Regime.PUBLISHED, "full", 0, 0),
+])
+def test_the_budget_a_method_was_handed_is_reported_with_it(
+        key, regime, expected_key, nominal, window):
+    method, handed, recent = method_for(regime, key, Budget(PROMPT, GENERATION, 1.0), seed=0)
+    assert (method.key, handed, recent) == (expected_key, nominal, window)
+
+
+def coded(positions, layers=1, heads=HEADS):
+    values = torch.tensor(list(positions), dtype=torch.float32)
+    key = values.view(1, 1, -1, 1).expand(BATCH, heads, len(values), DIM).clone()
+    return tuple((key.clone(), key.clone()) for _ in range(layers))
+
+
+def attention_over(length, layers=1, heads=HEADS):
+    """One decode query attending to `length` cached positions, weighted so the
+    oldest generated positions score highest. A scorer that ignores the prompt
+    slice would keep a different set, which is what makes this non-uniform."""
+    weights = torch.linspace(1.0, 0.1, length).view(1, 1, 1, length).expand(BATCH, heads, 1, length)
+    return tuple(weights.clone() for _ in range(layers))
+
+
+def test_a_wrapped_scorer_never_reaches_the_prompt():
+    prompt_length, generation_budget, steps = 6, 3, 9
+    method = PromptProtected(H2O(budget=generation_budget, recent=1), generation_budget)
+    cache = coded(range(prompt_length))
+    method.apply(cache, None)
+    for step in range(steps):
+        cache = tuple((torch.cat([k, nk], dim=2), torch.cat([v, nv], dim=2))
+                      for (k, v), (nk, nv) in zip(cache, coded([prompt_length + step])))
+        cache = method.step(cache, attention_over(cache[0][0].shape[2]))
+
+    for head in range(HEADS):
+        kept = [int(p) for p in cache[0][0][0, head, :, 0].tolist()]
+        assert kept[:prompt_length] == list(range(prompt_length))
+        assert len(kept) == prompt_length + min(generation_budget, steps)
+        assert kept == sorted(kept)
+    assert torch.equal(cache[0][0], cache[0][1])
+    assert method.kept_len(prompt_length + steps) == prompt_length + generation_budget
+
+
+def test_published_indices_are_composed_through_the_protected_prefix():
+    """The wrapper's inner method indexes the generated sub-cache. Published
+    unshifted, those indices would point into the prompt and every provenance
+    figure downstream would be wrong."""
+    prompt_length, generation_budget = 4, 2
+    method = PromptProtected(H2O(budget=generation_budget, recent=1), generation_budget)
+    cache = coded(range(prompt_length))
+    method.apply(cache, None)
+    for step in range(4):
+        cache = tuple((torch.cat([k, nk], dim=2), torch.cat([v, nv], dim=2))
+                      for (k, v), (nk, nv) in zip(cache, coded([prompt_length + step])))
+        cache = method.step(cache, attention_over(cache[0][0].shape[2]))
+
+    published = method.last_indices[0]
+    assert published.shape[-1] == cache[0][0].shape[2]
+    assert published[0, 0, :prompt_length].tolist() == list(range(prompt_length))
+    assert (published[0, 0, prompt_length:] >= prompt_length).all()
+
+
+def test_an_after_prefill_press_cannot_be_wrapped():
+    with pytest.raises(ValueError, match="observation window of prompt queries"):
+        PromptProtected(SnapKV(budget=4, window=2), generation_budget=4)
+
+
+def row(seed, metric_value, method="Prompt-protected random", regime="published"):
+    return BoundaryRow(
+        model="distilgpt2", regime=regime, method=method, method_key="random", seed=seed,
+        example=0, task="needle", task_metric="passkey_em", metric_value=metric_value,
+        requested_prompt_length=128, prompt_length=130, requested_generation_length=48,
+        actual_generation_length=48, retained_fraction=0.5, total_budget=88,
+        generation_budget=-42, nominal_budget=0, window=0, prompt_retained=130.0,
+        generated_retained=0.0, total_retained=130.0, kv_bytes=1.0, kv_bytes_kind="analytical",
+        compression_ratio=0.25, decode_wall_seconds=0.1)
+
+
+def test_summary_reports_the_spread_across_seeds_not_one_lucky_draw():
+    hits = [1.0, 1.0, 1.0, 0.0, 0.0]
+    summaries = summarize([row(seed, hit) for seed, hit in enumerate(hits)])
+    assert len(summaries) == 1
+    assert summaries[0].seeds == len(hits)
+    assert summaries[0].metric_mean == pytest.approx(sum(hits) / len(hits))
+    assert summaries[0].metric_stdev > 0
+
+    split = summarize([row(0, 1.0), row(1, 1.0, method="H2O")])
+    assert {s.method for s in split} == {"Prompt-protected random", "H2O"}
+    assert all(s.seeds == 1 and s.metric_stdev == 0 for s in split)
+
+
+def test_results_carry_every_column_a_reader_has_to_check(tmp_path):
+    stem = str(tmp_path / "run")
+    rows = [row(0, 1.0)]
+    write_rows(rows, summarize(rows), stem, {"model": "distilgpt2"})
+
+    import csv
+    import json
+
+    with open(f"{stem}.csv") as handle:
+        header = next(csv.reader(handle))
+    required = {"model", "method", "seed", "prompt_length", "requested_generation_length",
+                "actual_generation_length", "generation_budget", "total_budget",
+                "prompt_retained", "generated_retained", "total_retained", "kv_bytes",
+                "kv_bytes_kind", "task", "task_metric", "metric_value"}
+    assert required <= set(header)
+
+    with open(f"{stem}.jsonl") as handle:
+        streamed = [json.loads(line) for line in handle]
+    assert [record["metric_value"] for record in streamed] == [r.metric_value for r in rows]
+
+    with open(f"{stem}.json") as handle:
+        saved = json.load(handle)
+    assert saved["config"] == {"model": "distilgpt2"}
+    assert [Summary(**s).method for s in saved["summary"]] == ["Prompt-protected random"]
