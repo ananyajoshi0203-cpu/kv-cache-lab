@@ -222,15 +222,39 @@ def _fit_filler(build_at, target_prompt_tokens: int, tokenizer):
     length is an independent variable of the sweep, so an example that misses its
     target by a wide margin is a different cell than the one that was asked for.
     """
+    def measure(built):
+        return len(tokenizer(built.context + built.question).input_ids)
+
+    def miss(length):
+        return abs(length - target_prompt_tokens)
+
     band = prompt_band(target_prompt_tokens)
     sentences = max(1, target_prompt_tokens // 12)
     built = build_at(sentences)
+    length = measure(built)
     for _ in range(8):
-        length = len(tokenizer(built.context + built.question).input_ids)
-        if abs(length - target_prompt_tokens) <= band or sentences <= 1:
+        scaled = max(0, round(sentences * target_prompt_tokens / length))
+        if miss(length) <= band or scaled == sentences:
             break
-        sentences = max(1, round(sentences * target_prompt_tokens / length))
+        sentences = scaled
         built = build_at(sentences)
+        length = measure(built)
+
+    # Then walk one sentence at a time. Scaling cannot land inside the band when a
+    # single filler sentence is a large share of the slack, which is precisely the
+    # high-redundancy case: most of the prompt is evidence, few filler sentences are
+    # left to trade, and the example would otherwise be refused for missing a target
+    # it could have hit.
+    step = 1 if length < target_prompt_tokens else -1
+    for _ in range(12):
+        if miss(length) <= band or sentences + step < 0:
+            break
+        candidate = build_at(sentences + step)
+        candidate_length = measure(candidate)
+        if miss(candidate_length) >= miss(length):
+            break
+        sentences += step
+        built, length = candidate, candidate_length
     return built
 
 

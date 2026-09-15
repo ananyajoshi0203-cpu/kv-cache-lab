@@ -4,7 +4,7 @@
   "not_evidence": "distilgpt2 cannot do the multistep task at all, so every multistep metric here is expected to be zero and the full-cache solvability check is expected to flag every multistep cell. That is the check working, not a result.",
   "model": "distilgpt2",
   "workloads": ["needle", "multistep"],
-  "shapes": [[128, 64], [320, 96]],
+  "shapes": [[128, 64], [384, 96]],
   "retain": [0.3, 0.6, 0.9],
   "seeds": [0, 1, 2],
   "examples": 2,

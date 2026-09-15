@@ -3,16 +3,78 @@
   "purpose": "The intended study: does selective scoring buy anything over a prompt-protected coin flip, and does the answer track the prompt's share of the context or the redundancy of what is in it.",
   "model": "Qwen/Qwen2.5-1.5B-Instruct",
   "model_notes": "See pilot.json. Run Llama-3.2-1B-Instruct as a second configuration before drawing any conclusion about head redundancy, since KV-head count is the mechanism Random Attention attributes its result to.",
-  "workloads": ["needle", "multistep"],
-  "shapes": [[128, 64], [128, 256], [128, 512],
-             [256, 64], [256, 256], [256, 512],
-             [512, 64], [512, 256]],
-  "retain": [0.2, 0.3, 0.4, 0.5, 0.6, 0.75, 0.9],
-  "seeds": [0, 1, 2, 3, 4],
+  "workloads": [
+    "needle",
+    "multistep"
+  ],
+  "shapes": [
+    [
+      128,
+      64
+    ],
+    [
+      128,
+      256
+    ],
+    [
+      128,
+      512
+    ],
+    [
+      256,
+      64
+    ],
+    [
+      256,
+      256
+    ],
+    [
+      256,
+      512
+    ],
+    [
+      384,
+      256
+    ],
+    [
+      512,
+      64
+    ],
+    [
+      512,
+      256
+    ]
+  ],
+  "retain": [
+    0.2,
+    0.3,
+    0.4,
+    0.5,
+    0.6,
+    0.75,
+    0.9
+  ],
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
   "examples": 8,
   "redundancy": null,
-  "methods": ["full", "random", "h2o", "snapkv", "cake", "obcache"],
-  "regimes": ["published", "prompt_protected"],
-  "feasibility": "multistep needs room for its evidence before any filler: 115 prompt tokens at low redundancy, 165 at medium, 265 at high, measured with minimum_prompt_tokens on the GPT-2 tokenizer. Prompt 128 therefore runs multistep at low redundancy only and prompt 256 at low and medium. Those cells are refused with a reason rather than run at the wrong prompt length, so redundancy is only comparable across all three levels at prompt 512.",
+  "methods": [
+    "full",
+    "random",
+    "h2o",
+    "snapkv",
+    "cake",
+    "obcache"
+  ],
+  "regimes": [
+    "published",
+    "prompt_protected"
+  ],
+  "feasibility": "multistep needs room for its evidence before any filler: 115 prompt tokens at low redundancy, 165 at medium, 265 at high, measured with minimum_prompt_tokens on the GPT-2 tokenizer. Prompt 128 therefore runs multistep at low redundancy only and prompt 256 at low and medium; all three levels are comparable at 384 and 512, which is why 384x256 is in the grid. Cells below a level's floor are refused with a reason rather than run at the wrong prompt length, since a prompt that overflows its target moves redundancy and prompt length together and neither can then be read.",
   "regime_note": "SnapKV, CAKE and OBCache have no prompt-protected form and are not run in that regime. They vote with an observation window of prompt queries, and protecting the prompt leaves a single decode query, which is a different scorer under the same name."
 }
