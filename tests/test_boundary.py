@@ -142,16 +142,21 @@ def test_an_after_prefill_press_cannot_be_wrapped():
 
 
 def row(seed, metric_value, method="Prompt-protected random", regime="published",
-        generation_length=48, retained_fraction=0.5):
+        generation_length=48, retained_fraction=0.5, task="needle", redundancy="none",
+        method_key="random", prompt_retained=130.0, generated_retained=0.0):
     return BoundaryRow(
-        model="distilgpt2", regime=regime, method=method, method_key="random", seed=seed,
-        example=0, task="needle", task_metric="passkey_em", metric_value=metric_value,
+        model="distilgpt2", regime=regime, method=method, method_key=method_key, seed=seed,
+        example=0, task=task, redundancy=redundancy, facts=1, statements=1,
+        task_metric="passkey_em", metric_value=metric_value,
         requested_prompt_length=128, prompt_length=130,
         requested_generation_length=generation_length,
-        actual_generation_length=generation_length, retained_fraction=retained_fraction,
-        total_budget=88, generation_budget=-42, nominal_budget=0, window=0, prompt_retained=130.0,
-        generated_retained=0.0, total_retained=130.0, kv_bytes=1.0, kv_bytes_kind="analytical",
-        compression_ratio=0.25, decode_wall_seconds=0.1)
+        actual_generation_length=generation_length,
+        cached_generation_length=generation_length - 1, retained_fraction=retained_fraction,
+        total_budget=88, generation_budget=-42, nominal_budget=0, window=0,
+        prompt_retained=prompt_retained, generated_retained=generated_retained,
+        total_retained=prompt_retained + generated_retained, generated_position_mean=0.0,
+        kv_bytes=1.0, kv_bytes_kind="analytical", compression_ratio=0.25,
+        decode_wall_seconds=0.1)
 
 
 def test_summary_reports_the_spread_across_seeds_not_one_lucky_draw():
@@ -270,8 +275,9 @@ def test_a_reused_decode_never_carries_another_cells_budget(modelless_sweep):
     fractions. The budget columns are not part of that decode and must be recomputed
     per row: reporting them out of the cached result stamped the first fraction's
     numbers onto every later one, silently."""
-    result = sweep("fake", prompt_lengths=(FAKE_PROMPT_TOKENS,),
-                   generation_lengths=GENERATION_LENGTHS,
+    result = sweep("fake", workload_keys=("needle",),
+                   shapes=tuple((FAKE_PROMPT_TOKENS, generation)
+                                for generation in GENERATION_LENGTHS),
                    retained_fractions=RETAINED_FRACTIONS, seeds=(0,), examples=1,
                    regimes=(Regime.PUBLISHED,), method_keys=("full",))
 
