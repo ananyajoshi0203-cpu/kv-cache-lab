@@ -50,28 +50,40 @@ def shapes(text):
     return tuple(pairs)
 
 
+#: One definition of every flag, so the parser that fills in defaults and the parser
+#: that reports only what was actually typed cannot drift apart.
+ARGUMENTS = [
+    (["--config"], dict(default="", help="JSON experiment configuration; any flag given on "
+                                         "the command line overrides it")),
+    (["--model"], dict(default="distilgpt2")),
+    (["--workloads"], dict(type=words, default=tuple(boundary.WORKLOADS))),
+    (["--shapes"], dict(type=shapes, default=boundary.DEFAULT_SHAPES,
+                        help="prompt x generation pairs, e.g. 128x64,256x512")),
+    (["--retain"], dict(type=floats, default=boundary.DEFAULT_FRACTIONS,
+                        help="fractions of the full cache every method is held to; the "
+                             "per-method budget that reaches each is derived and recorded, "
+                             "never shared")),
+    (["--redundancy"], dict(type=words, default=None,
+                            help="prompt-redundancy levels; omit for every level each "
+                                 "workload varies")),
+    (["--seeds"], dict(type=ints, default=(0, 1, 2, 3, 4))),
+    (["--examples"], dict(type=int, default=1, help="task examples per seed")),
+    (["--out"], dict(default="")),
+    (["--verbose"], dict(action="store_true")),
+]
+
+
 def build_parser(explicit_only=False):
     """With explicit_only, unsupplied flags are absent from the parse rather than
     filled with defaults, which is how a configuration file can be overridden by the
     command line without a default silently counting as an override."""
-    ap = argparse.ArgumentParser(
-        argument_default=argparse.SUPPRESS if explicit_only else None)
-    ap.add_argument("--config", default="", help="JSON experiment configuration; any flag "
-                                                 "given on the command line overrides it")
-    ap.add_argument("--model", default="distilgpt2")
-    ap.add_argument("--workloads", type=words, default=tuple(boundary.WORKLOADS))
-    ap.add_argument("--shapes", type=shapes, default=boundary.DEFAULT_SHAPES,
-                    help="prompt x generation pairs, e.g. 128x64,256x512")
-    ap.add_argument("--retain", type=floats, default=boundary.DEFAULT_FRACTIONS,
-                    help="fractions of the full cache every method is held to; the per-method "
-                         "budget that reaches each is derived and recorded, never shared")
-    ap.add_argument("--redundancy", type=words, default=None,
-                    help="prompt-redundancy levels; omit for every level each workload varies")
-    ap.add_argument("--seeds", type=ints, default=(0, 1, 2, 3, 4))
-    ap.add_argument("--examples", type=int, default=1, help="task examples per seed")
-    ap.add_argument("--out", default="")
-    ap.add_argument("--verbose", action="store_true")
-    return ap
+    parser = argparse.ArgumentParser()
+    for flags, options in ARGUMENTS:
+        if explicit_only:
+            options = {key: value for key, value in options.items() if key != "default"}
+            options["default"] = argparse.SUPPRESS
+        parser.add_argument(*flags, **options)
+    return parser
 
 
 CONFIG_KEYS = ("model", "workloads", "shapes", "retain", "redundancy", "seeds", "examples")

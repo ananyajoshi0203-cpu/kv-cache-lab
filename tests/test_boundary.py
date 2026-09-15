@@ -14,16 +14,19 @@ covered in test_rope_integration. Run: `pytest tests/`.
 import os
 import sys
 
+import json
+
 import pytest
 import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kvlab.boundary import (                                          # noqa: E402
-    NO_PROMPT_PROTECTED_FORM, UNREACHABLE_BY_PRESS, UNREACHABLE_BY_PROTECTION,
-    BoundaryRow, Budget, PromptProtected, Regime, Summary, format_summary, method_for,
-    summarize, sweep, write_rows,
+    NO_PROMPT_PROTECTED_FORM, PROMPT_TARGET_UNREACHABLE, UNREACHABLE_BY_PRESS,
+    UNREACHABLE_BY_PROTECTION, BoundaryRow, Budget, PromptProtected, Regime, Summary,
+    format_summary, method_for, summarize, sweep, write_rows,
 )
+from kvlab import boundary as boundary_module                        # noqa: E402
 from kvlab.memory import MODELS                                       # noqa: E402
 from kvlab.methods import H2O, SnapKV                                 # noqa: E402
 
@@ -294,3 +297,50 @@ def test_a_reused_decode_never_carries_another_cells_budget(modelless_sweep):
         # Different cell, so different budget.
         assert low.total_budget < high.total_budget
         assert low.generation_budget < high.generation_budget
+
+
+MULTISTEP_TOO_SHORT, MULTISTEP_ROOMY = 40, 300
+
+
+def test_a_prompt_the_workload_cannot_build_is_skipped_not_relabelled(modelless_sweep):
+    """multistep's evidence and instructions have a floor. A target below it would
+    still produce rows, just at a longer prompt than the row claims, which would put
+    redundancy and prompt length on the same axis and make both unreadable."""
+    result = sweep("fake", workload_keys=("multistep",),
+                   shapes=((MULTISTEP_TOO_SHORT, 12), (MULTISTEP_ROOMY, 12)),
+                   retained_fractions=(0.5,), redundancies=("low",), seeds=(0,), examples=1,
+                   regimes=(Regime.PUBLISHED,), method_keys=("full",))
+
+    assert {row.requested_prompt_length for row in result.rows} == {MULTISTEP_ROOMY}
+    refused = [skip for skip in result.skipped if skip.reason == PROMPT_TARGET_UNREACHABLE]
+    assert [skip.prompt_length for skip in refused] == [MULTISTEP_TOO_SHORT]
+    for row in result.rows:
+        assert abs(row.prompt_length - row.requested_prompt_length) <= \
+            boundary_module.prompt_band(row.requested_prompt_length)
+        assert (row.task, row.redundancy) == ("multistep", "low")
+
+
+def test_a_configuration_file_is_read_and_the_command_line_still_wins():
+    """The checked-in configurations are the reproducible part of the study, so a flag
+    has to override one without a default silently counting as an override."""
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location(
+        "run_boundary_sweep",
+        os.path.join(os.path.dirname(__file__), "..", "examples", "run_boundary_sweep.py"))
+    cli = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(cli)
+
+    config = os.path.join(os.path.dirname(__file__), "..", "experiments", "smoke.json")
+    with open(config) as handle:
+        saved = json.load(handle)
+
+    from_file = cli.resolve(["--config", config])
+    assert from_file.model == saved["model"]
+    assert from_file.shapes == tuple(tuple(shape) for shape in saved["shapes"])
+    assert from_file.seeds == tuple(saved["seeds"])
+    assert from_file.examples == saved["examples"]
+
+    overridden = cli.resolve(["--config", config, "--seeds", "9", "--examples", "3"])
+    assert overridden.seeds == (9,) and overridden.examples == 3
+    assert overridden.shapes == from_file.shapes, "unspecified flags keep the file's values"
