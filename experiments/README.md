@@ -9,11 +9,15 @@ python examples/run_boundary_analysis.py --rows results/smoke.jsonl \
     --out results/smoke_analysis --plots results/plots
 ```
 
-| Config | What it is for | Decodes | Rough cost |
+| Config | What it is for | Decodes | Cost |
 |---|---|---|---|
-| `smoke.json` | plumbing only, distilgpt2, CPU | ~800 | ~20 min on a laptop |
-| `pilot.json` | the smallest run that could answer the question | ~11k | ~60 GPU-hours |
-| `full_study.json` | the intended grid | ~40k | ~220 GPU-hours |
+| `smoke.json` | plumbing only, distilgpt2, CPU | 504 measured | ~7 min on a laptop, measured |
+| `pilot.json` | the smallest run that could answer the question | ~5,200 | ~24 GPU-hours, estimated |
+| `full_study.json` | the intended grid | ~37,000 | ~205 GPU-hours, estimated |
+
+The smoke figure is measured: 504 decodes at 0.79 s each. The other two are arithmetic
+over the grid, not observations, and they assume a rate this repository has not yet
+measured on a GPU. Run the pilot before believing the full-study number.
 
 ## Read the smoke run for what it is
 
@@ -33,7 +37,9 @@ and everything else decodes once per unit per retained fraction.
 
 The estimates above assume roughly 0.08 s per generated token for a 1.5B model with
 eager attention and per-step Python decoding, which is the harness's actual shape and
-not a throughput claim. Two reductions are available and neither is implemented here:
+not a throughput claim. They also discount the grid by 20% for cells no method can
+reach, which is roughly what the smoke run skipped; the real fraction depends on the
+shapes and is reported per run. Two reductions are available and neither is implemented here:
 the score-free methods do not need attention weights at all, and prefill attention
 could be freed after the prompt scorers have run.
 
