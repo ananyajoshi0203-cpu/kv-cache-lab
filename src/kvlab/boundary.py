@@ -269,6 +269,24 @@ class PromptProtected(KVMethod):
         return self.prompt_length + min(self.generation_budget, generated)
 
 
+def budget_metadata(regime: Regime, key: str, budget: Budget) -> dict[str, int]:
+    """The budget facts that belong to a cell rather than to a decode.
+
+    These are derived here and never returned from a memoized decode. A decode is
+    reused across cells it cannot tell apart -- the full cache ignores the budget
+    entirely, so it runs once and is reported at every retained fraction -- and a
+    cached result that carried its own budget would stamp the first cell's numbers
+    onto every later one, which is a silent bookkeeping error rather than a loud
+    failure. So the reused part is the decode, and these are recomputed per row.
+    """
+    nominal, _ = budget.nominal_for(key, regime)
+    nominal = 0 if nominal is None else nominal
+    return {"total_budget": budget.total_budget,
+            "generation_budget": budget.generation_budget,
+            "nominal_budget": nominal,
+            "window": budget.window(nominal) if key in SCORED_KEYS else 0}
+
+
 def method_for(regime: Regime, key: str, budget: Budget,
                seed: int) -> tuple[KVMethod, int, int] | str:
     """The method, the nominal budget it was handed and the recency window it ended
@@ -288,7 +306,7 @@ def method_for(regime: Regime, key: str, budget: Budget,
     if key not in SCORED_KEYS:
         raise KeyError(f"{key} is not a method this sweep knows how to budget")
 
-    window = budget.window(nominal)
+    window = budget_metadata(regime, key, budget)["window"]
     inner = build(key, budget=nominal, **{_WINDOW_KWARG[key]: window})
     if regime is Regime.PUBLISHED:
         return inner, nominal, window
@@ -366,7 +384,8 @@ def _memo_key(regime: Regime, method_key: str, cell: Cell, seed: int, index: int
     it cannot see. The full cache ignores the budget entirely, and both it and
     random behave identically in either regime -- random is prompt-protected by
     construction -- so they are decoded once and reported under every cell that
-    shares what they do depend on."""
+    shares what they do depend on. Only the decode is shared: everything a cell
+    knows and a decode does not comes from budget_metadata, per row."""
     if method_key == "full":
         return ("-", "full", cell.prompt_length, cell.generation_length, seed, index)
     return (regime.value if method_key in SCORED_KEYS else "-", method_key, cell, seed, index)
@@ -416,13 +435,16 @@ def sweep(model_name: str = "distilgpt2", *, workload_key: str = "needle",
                         if isinstance(measured, str):
                             note(regime, key, cell, measured)
                             continue
+                        budget = Budget(measured["prompt_length"], cell.generation_length,
+                                        cell.retained_fraction)
                         rows.append(BoundaryRow(
                             model=cfg.name, regime=regime.value, seed=seed, example=index,
                             task=workload.key, task_metric=workload.task_metric,
                             requested_prompt_length=cell.prompt_length,
                             requested_generation_length=cell.generation_length,
                             retained_fraction=cell.retained_fraction,
-                            kv_bytes_kind=KV_BYTES_KIND, **measured))
+                            kv_bytes_kind=KV_BYTES_KIND,
+                            **budget_metadata(regime, key, budget), **measured))
                         logger.debug("%s", rows[-1])
     return SweepResult(rows=rows, skipped=skipped, cfg=cfg)
 
@@ -435,7 +457,7 @@ def _one(model, tokenizer, cfg, workload: Workload, regime: Regime, key: str, ce
     chosen = method_for(regime, key, budget, seed)
     if isinstance(chosen, str):
         return chosen
-    method, nominal, window = chosen
+    method, _nominal, _window = chosen
 
     ledger = CacheLedger()
     started = time.perf_counter()
@@ -449,9 +471,6 @@ def _one(model, tokenizer, cfg, workload: Workload, regime: Regime, key: str, ce
         "metric_value": workload.score(example, text),
         "prompt_length": ids.shape[1],
         "actual_generation_length": int(generated.shape[1]),
-        "total_budget": budget.total_budget,
-        "generation_budget": budget.generation_budget,
-        "nominal_budget": nominal, "window": window,
         "prompt_retained": account.prompt_retained,
         "generated_retained": account.generated_retained,
         "total_retained": account.total_retained,
@@ -463,13 +482,18 @@ def _one(model, tokenizer, cfg, workload: Workload, regime: Regime, key: str, ce
 
 @dataclass(frozen=True)
 class Summary:
-    """One grid point for one method, aggregated over seeds. The dispersion column
-    is why seeds are swept at all: a single lucky draw of a score-free method is not
-    a result, and neither is a single unlucky one."""
+    """One grid point for one method, aggregated over seeds and nothing else.
+
+    Every independent variable of the sweep is part of the grouping key, generation
+    length included: a summary that averaged a 64-token generation together with a
+    384-token one would be reporting a number that describes neither. The dispersion
+    column is why seeds are swept at all, since a single lucky draw of a score-free
+    method is not a result and neither is a single unlucky one."""
 
     regime: str
     method: str
     prompt_length: int
+    generation_length: int
     retained_fraction: float
     seeds: int
     metric_mean: float
@@ -483,16 +507,18 @@ def summarize(rows: Iterable[BoundaryRow]) -> list[Summary]:
     grouped: dict[tuple, list[BoundaryRow]] = {}
     for row in rows:
         grouped.setdefault(
-            (row.regime, row.method, row.requested_prompt_length, row.retained_fraction),
+            (row.regime, row.method, row.requested_prompt_length,
+             row.requested_generation_length, row.retained_fraction),
             []).append(row)
     summaries = []
-    for (regime, method, prompt_length, fraction), group in grouped.items():
+    for (regime, method, prompt_length, generation_length, fraction), group in grouped.items():
         per_seed: dict[int, list[float]] = {}
         for row in group:
             per_seed.setdefault(row.seed, []).append(row.metric_value)
         seed_means = [mean(values) for values in per_seed.values()]
         summaries.append(Summary(
             regime=regime, method=method, prompt_length=prompt_length,
+            generation_length=generation_length,
             retained_fraction=fraction, seeds=len(seed_means),
             metric_mean=mean(seed_means), metric_stdev=pstdev(seed_means),
             prompt_retained=mean(row.prompt_retained for row in group),
@@ -502,15 +528,16 @@ def summarize(rows: Iterable[BoundaryRow]) -> list[Summary]:
 
 
 def format_summary(summaries: Sequence[Summary], task_metric: str) -> str:
-    header = (f"{'regime':<17}{'method':<32}{'prompt':>7}{'retain':>7}{'seeds':>6}"
+    header = (f"{'regime':<17}{'method':<32}{'prompt':>7}{'gen':>6}{'retain':>7}{'seeds':>6}"
               f"{task_metric:>12}{'stdev':>7}{'kept':>8}{'prompt_kept':>12}{'KV KB':>9}")
     lines = [header, "-" * len(header)]
-    order = sorted(summaries, key=lambda s: (s.regime, s.prompt_length, s.retained_fraction,
-                                             s.method))
+    order = sorted(summaries, key=lambda s: (s.regime, s.prompt_length, s.generation_length,
+                                             s.retained_fraction, s.method))
     for s in order:
-        lines.append(f"{s.regime:<17}{s.method:<32}{s.prompt_length:>7}{s.retained_fraction:>7.2f}"
-                     f"{s.seeds:>6}{s.metric_mean:>12.2f}{s.metric_stdev:>7.2f}"
-                     f"{s.total_retained:>8.1f}{s.prompt_retained:>12.1f}{s.kv_bytes / 1024:>9.1f}")
+        lines.append(f"{s.regime:<17}{s.method:<32}{s.prompt_length:>7}{s.generation_length:>6}"
+                     f"{s.retained_fraction:>7.2f}{s.seeds:>6}{s.metric_mean:>12.2f}"
+                     f"{s.metric_stdev:>7.2f}{s.total_retained:>8.1f}{s.prompt_retained:>12.1f}"
+                     f"{s.kv_bytes / 1024:>9.1f}")
     return "\n".join(lines)
 
 

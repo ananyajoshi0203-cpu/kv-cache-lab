@@ -21,8 +21,10 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
 
 from kvlab.boundary import (                                          # noqa: E402
     NO_PROMPT_PROTECTED_FORM, UNREACHABLE_BY_PRESS, UNREACHABLE_BY_PROTECTION,
-    BoundaryRow, Budget, PromptProtected, Regime, Summary, method_for, summarize, write_rows,
+    BoundaryRow, Budget, PromptProtected, Regime, Summary, format_summary, method_for,
+    summarize, sweep, write_rows,
 )
+from kvlab.memory import MODELS                                       # noqa: E402
 from kvlab.methods import H2O, SnapKV                                 # noqa: E402
 
 PROMPT, GENERATION = 100, 51        # 50 generated positions ever reach the cache
@@ -139,13 +141,15 @@ def test_an_after_prefill_press_cannot_be_wrapped():
         PromptProtected(SnapKV(budget=4, window=2), generation_budget=4)
 
 
-def row(seed, metric_value, method="Prompt-protected random", regime="published"):
+def row(seed, metric_value, method="Prompt-protected random", regime="published",
+        generation_length=48, retained_fraction=0.5):
     return BoundaryRow(
         model="distilgpt2", regime=regime, method=method, method_key="random", seed=seed,
         example=0, task="needle", task_metric="passkey_em", metric_value=metric_value,
-        requested_prompt_length=128, prompt_length=130, requested_generation_length=48,
-        actual_generation_length=48, retained_fraction=0.5, total_budget=88,
-        generation_budget=-42, nominal_budget=0, window=0, prompt_retained=130.0,
+        requested_prompt_length=128, prompt_length=130,
+        requested_generation_length=generation_length,
+        actual_generation_length=generation_length, retained_fraction=retained_fraction,
+        total_budget=88, generation_budget=-42, nominal_budget=0, window=0, prompt_retained=130.0,
         generated_retained=0.0, total_retained=130.0, kv_bytes=1.0, kv_bytes_kind="analytical",
         compression_ratio=0.25, decode_wall_seconds=0.1)
 
@@ -187,3 +191,100 @@ def test_results_carry_every_column_a_reader_has_to_check(tmp_path):
         saved = json.load(handle)
     assert saved["config"] == {"model": "distilgpt2"}
     assert [Summary(**s).method for s in saved["summary"]] == ["Prompt-protected random"]
+
+
+# Two generation lengths and two retained fractions, with a metric value chosen per
+# cell so that any pair averaged together lands on a value no cell reported.
+GENERATION_LENGTHS = (64, 384)
+RETAINED_FRACTIONS = (0.25, 0.75)
+CELL_METRIC = {(64, 0.25): 1.0, (64, 0.75): 0.0, (384, 0.25): 0.0, (384, 0.75): 1.0}
+
+
+def test_every_independent_variable_survives_summarizing():
+    """Generation length is a primary axis of the sweep, so summarizing must not
+    average across it. It did, which turned two cells that disagree completely into
+    one row reporting a figure neither of them measured."""
+    rows = [row(seed, metric, generation_length=generation, retained_fraction=fraction)
+            for (generation, fraction), metric in CELL_METRIC.items()
+            for seed in range(3)]
+    summaries = summarize(rows)
+
+    assert len(summaries) == len(CELL_METRIC)
+    assert {(s.generation_length, s.retained_fraction): s.metric_mean
+            for s in summaries} == CELL_METRIC
+    assert all(s.seeds == 3 and s.metric_stdev == 0 for s in summaries)
+    assert "gen" in format_summary(summaries, "passkey_em").splitlines()[0]
+
+
+CFG = MODELS["distilgpt2"]
+FAKE_PROMPT_TOKENS = 40
+
+
+class FakeTokenizer:
+    """Whitespace tokenisation, enough for the sweep to size a prompt and read one
+    back. The sweep only ever asks for a length or a decoded string."""
+
+    def __call__(self, text, return_tensors=None):
+        words = text.split()
+        if return_tensors is None:
+            return type("Encoded", (), {"input_ids": words})()
+        return type("Encoded", (), {
+            "input_ids": torch.zeros(1, len(words), dtype=torch.long)})()
+
+    def decode(self, ids, skip_special_tokens=True):
+        return ""
+
+
+def fake_cache(length, layers=CFG.layers, heads=CFG.n_kv_heads):
+    key = torch.zeros(1, heads, length, 2)
+    return tuple((key.clone(), key.clone()) for _ in range(layers))
+
+
+def fake_generate(model, ids, method, max_new_tokens=64, eos_token_id=None, ledger=None):
+    """A decode with no model in it, driving the ledger exactly as the real loop
+    does so the accounting a row reports is still real."""
+    cache = fake_cache(ids.shape[1])
+    ledger.start(cache)
+    cache = method.apply(cache, None)
+    ledger.compact(method, cache)
+    for _ in range(max_new_tokens - 1):
+        grown = torch.zeros(1, cache[0][0].shape[1], 1, 2)
+        cache = tuple((torch.cat([k, grown], dim=2), torch.cat([v, grown], dim=2))
+                      for k, v in cache)
+        ledger.append()
+        cache = method.step(cache, None)
+        ledger.compact(method, cache)
+    return torch.zeros(1, max_new_tokens, dtype=torch.long)
+
+
+@pytest.fixture
+def modelless_sweep(monkeypatch):
+    model = type("FakeModel", (), {"config": type("Config", (), {"n_positions": 1024})()})()
+    monkeypatch.setattr("kvlab.model.load_model", lambda name, device="cpu": (
+        model, FakeTokenizer(), CFG))
+    monkeypatch.setattr("kvlab.decode.generate_stepwise", fake_generate)
+
+
+def test_a_reused_decode_never_carries_another_cells_budget(modelless_sweep):
+    """The full cache ignores the budget, so its decode is memoized across retained
+    fractions. The budget columns are not part of that decode and must be recomputed
+    per row: reporting them out of the cached result stamped the first fraction's
+    numbers onto every later one, silently."""
+    result = sweep("fake", prompt_lengths=(FAKE_PROMPT_TOKENS,),
+                   generation_lengths=GENERATION_LENGTHS,
+                   retained_fractions=RETAINED_FRACTIONS, seeds=(0,), examples=1,
+                   regimes=(Regime.PUBLISHED,), method_keys=("full",))
+
+    assert len(result.rows) == len(GENERATION_LENGTHS) * len(RETAINED_FRACTIONS)
+    by_cell = {(r.requested_generation_length, r.retained_fraction): r for r in result.rows}
+    assert set(by_cell) == set(CELL_METRIC)
+
+    for generation_length in GENERATION_LENGTHS:
+        low = by_cell[(generation_length, min(RETAINED_FRACTIONS))]
+        high = by_cell[(generation_length, max(RETAINED_FRACTIONS))]
+        # Same decode, genuinely reused: identical prompt and identical wall clock.
+        assert low.prompt_length == high.prompt_length
+        assert low.decode_wall_seconds == high.decode_wall_seconds
+        # Different cell, so different budget.
+        assert low.total_budget < high.total_budget
+        assert low.generation_budget < high.generation_budget
