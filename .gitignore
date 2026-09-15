@@ -14,3 +14,4 @@ results/*.png
 .DS_Store
 # HF model / dataset caches
 .cache/
+results/

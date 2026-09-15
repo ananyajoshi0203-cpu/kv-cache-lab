@@ -1,19 +1,22 @@
 """Sweep for the boundary where a score starts to beat a coin flip.
 
-Prompt length x generation length x retained fraction of the cache, against the
+Workload x redundancy x (prompt, generation) shape x retained fraction, against the
 score-free prompt-protected random baseline, in two regimes: methods as published,
 and methods with the prompt held out of reach. Read kvlab.boundary's module
-docstring first. Every method in a row is held to the same final cache size, and
-the nominal budget each needed to get there is different and is recorded.
+docstring first. Every method in a row is held to the same final cache size, and the
+nominal budget each needed to get there is different and is recorded.
 
     pip install torch transformers
-    python examples/run_boundary_sweep.py --out results/boundary
+    python examples/run_boundary_sweep.py --out results/smoke
+    python examples/run_boundary_sweep.py --config experiments/smoke.json --out results/smoke
 
-Defaults are sized for a CPU run on distilgpt2. Every axis is a flag, so widen it
-where the machine allows.
+Defaults are sized for a CPU run on distilgpt2, which is a plumbing check and not
+evidence about how a modern model uses its cache. The checked-in configurations under
+experiments/ describe the runs that are.
 """
 
 import argparse
+import json
 import os
 import sys
 
@@ -33,32 +36,124 @@ def floats(text):
     return tuple(float(part) for part in text.split(","))
 
 
+def words(text):
+    return tuple(part.strip() for part in text.split(",") if part.strip())
+
+
+def shapes(text):
+    """--shapes 128x64,256x512 -- explicit pairs, because the interesting matrix is
+    not the full cross product of prompt and generation lengths."""
+    pairs = []
+    for part in text.split(","):
+        prompt, _, generation = part.strip().lower().partition("x")
+        pairs.append((int(prompt), int(generation)))
+    return tuple(pairs)
+
+
+#: One definition of every flag, so the parser that fills in defaults and the parser
+#: that reports only what was actually typed cannot drift apart.
+ARGUMENTS = [
+    (["--config"], dict(default="", help="JSON experiment configuration; any flag given on "
+                                         "the command line overrides it")),
+    (["--model"], dict(default="distilgpt2")),
+    (["--workloads"], dict(type=words, default=tuple(boundary.WORKLOADS))),
+    (["--methods"], dict(type=words, default=None,
+                         help="which methods to run; omit for the cache methods. Add "
+                              f"{' and '.join(boundary.ABLATION_KEYS)} to run the trace "
+                              "ablation, which is a diagnostic and not a cache method")),
+    (["--shapes"], dict(type=shapes, default=boundary.DEFAULT_SHAPES,
+                        help="prompt x generation pairs, e.g. 128x64,256x512")),
+    (["--retain"], dict(type=floats, default=boundary.DEFAULT_FRACTIONS,
+                        help="fractions of the full cache every method is held to; the "
+                             "per-method budget that reaches each is derived and recorded, "
+                             "never shared")),
+    (["--redundancy"], dict(type=words, default=None,
+                            help="prompt-redundancy levels; omit for every level each "
+                                 "workload varies")),
+    (["--task-seeds"], dict(type=ints, default=(0, 1, 2, 3, 4),
+                            help="which task instances to draw: facts, operations, filler "
+                                 "and target")),
+    (["--eviction-seeds"], dict(type=ints, default=(0, 1, 2, 3, 4),
+                                help="draws for the random baseline only; deterministic "
+                                     "methods are decoded once, not once per draw")),
+    (["--examples"], dict(type=int, default=1, help="task examples per seed")),
+    (["--out"], dict(default="")),
+    (["--require-comparable-shapes"], dict(type=int, default=1,
+                                           help="how many shapes must hold every redundancy "
+                                                "level before the run is allowed to start")),
+    (["--skip-preflight"], dict(action="store_true",
+                                help="run without checking the grid against the model's "
+                                     "tokenizer first. Only for debugging the runner")),
+    (["--verbose"], dict(action="store_true")),
+]
+
+
+def build_parser(explicit_only=False):
+    """With explicit_only, unsupplied flags are absent from the parse rather than
+    filled with defaults, which is how a configuration file can be overridden by the
+    command line without a default silently counting as an override."""
+    parser = argparse.ArgumentParser()
+    for flags, options in ARGUMENTS:
+        if explicit_only:
+            options = {key: value for key, value in options.items() if key != "default"}
+            options["default"] = argparse.SUPPRESS
+        parser.add_argument(*flags, **options)
+    return parser
+
+
+CONFIG_KEYS = ("model", "workloads", "methods", "shapes", "retain", "redundancy",
+               "task_seeds", "eviction_seeds", "examples", "require_comparable_shapes")
+
+
+def resolve(argv=None):
+    """Command line over configuration file over defaults."""
+    argv = list(sys.argv[1:] if argv is None else argv)
+    args = build_parser().parse_args(argv)
+    if not args.config:
+        return args
+
+    given = vars(build_parser(explicit_only=True).parse_args(argv))
+    with open(args.config) as handle:
+        config = json.load(handle)
+    for key in CONFIG_KEYS:
+        if key not in config or key in given:
+            continue
+        value = config[key]
+        if key == "shapes":
+            value = tuple(tuple(pair) for pair in value)
+        elif isinstance(value, list):
+            value = tuple(value)
+        setattr(args, key, value)
+    return args
+
+
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--model", default="distilgpt2")
-    ap.add_argument("--workload", default="needle", choices=sorted(boundary.WORKLOADS))
-    ap.add_argument("--prompts", type=ints, default=(128, 384),
-                    help="target prompt lengths in tokens")
-    ap.add_argument("--gen", type=ints, default=(48,), help="generation lengths in tokens")
-    ap.add_argument("--retain", type=floats, default=(0.25, 0.5, 0.75),
-                    help="fraction of the full cache every method is held to; the per-method "
-                         "budget that reaches it is derived and recorded, never shared")
-    ap.add_argument("--seeds", type=ints, default=(0, 1, 2, 3, 4))
-    ap.add_argument("--examples", type=int, default=1, help="examples per seed")
-    ap.add_argument("--out", default="")
-    ap.add_argument("--verbose", action="store_true")
-    args = ap.parse_args()
+    args = resolve()
     configure(verbose=args.verbose)
 
+    checked = None
+    if not args.skip_preflight:
+        from kvlab import preflight
+        checked = preflight.run(args.model, workload_keys=args.workloads, shapes=args.shapes,
+                                redundancies=args.redundancy,
+                                require_comparable_shapes=args.require_comparable_shapes)
+        log.info("\n%s", preflight.format_report(checked))
+        if not checked.ok:
+            log.error("refusing to run: the grid cannot make the comparisons it is for. "
+                      "Fix the shapes, or pass --skip-preflight if you are debugging the "
+                      "runner and do not intend to read the results.")
+            return 1
+
     result = boundary.sweep(
-        args.model, workload_key=args.workload, prompt_lengths=args.prompts,
-        generation_lengths=args.gen, retained_fractions=args.retain,
-        seeds=args.seeds, examples=args.examples)
-    workload = boundary.WORKLOADS[args.workload]
+        args.model, workload_keys=args.workloads, shapes=args.shapes,
+        retained_fractions=args.retain, redundancies=args.redundancy,
+        task_seeds=args.task_seeds, eviction_seeds=args.eviction_seeds,
+        examples=args.examples, method_keys=args.methods)
     summaries = boundary.summarize(result.rows)
-    log.info("\n%s", boundary.format_summary(summaries, workload.task_metric))
+    log.info("\n%s", boundary.format_summary(summaries, "metric"))
     for skip in result.skipped:
-        log.info("skipped %s/%s at prompt=%d gen=%d retain=%.2f: %s", skip.regime, skip.method_key,
+        log.info("skipped %s/%s on %s/%s at prompt=%d gen=%d retain=%.2f: %s",
+                 skip.regime, skip.method_key, skip.workload, skip.redundancy,
                  skip.prompt_length, skip.generation_length, skip.retained_fraction, skip.reason)
 
     if args.out:
@@ -67,16 +162,31 @@ def main():
         config = {
             "model": result.cfg.name, "layers": result.cfg.layers,
             "kv_heads": result.cfg.n_kv_heads, "head_dim": result.cfg.head_dim,
-            "workload": workload.key, "workload_note": workload.note,
-            "task_metric": workload.task_metric,
-            "prompt_lengths": list(args.prompts), "generation_lengths": list(args.gen),
-            "retained_fractions": list(args.retain), "seeds": list(args.seeds),
-            "examples_per_seed": args.examples,
+            "workloads": list(args.workloads),
+            "methods": list(args.methods) if args.methods else list(boundary.DEFAULT_METHODS),
+            "workload_notes": {key: boundary.WORKLOADS[key].note for key in args.workloads},
+            "shapes": [list(shape) for shape in args.shapes],
+            "retained_fractions": list(args.retain),
+            "redundancy": list(args.redundancy) if args.redundancy else "every level per workload",
+            "task_seeds": list(args.task_seeds), "eviction_seeds": list(args.eviction_seeds),
+            "examples_per_task_seed": args.examples,
+            "seed_semantics": "a task seed chooses the facts, operations, filler and target; "
+                              "an eviction seed chooses only what the random baseline throws "
+                              "away. Deterministic methods carry eviction_seed -1 and are "
+                              "decoded once per task instance, never once per draw",
             "budget_semantics": "every method in a cell is held to the same total_budget; "
                                 "generation_budget bounds the generated cache only, so a "
                                 "prompt-protected run holds prompt_length + generation_budget "
                                 "and the two numbers are never interchanged",
             "kv_bytes_kind": boundary.KV_BYTES_KIND,
+            "preflight": None if checked is None else {
+                "context_limit": checked.context_limit,
+                "prompt_floors": {f"{f.workload}/{f.redundancy}": f.minimum_prompt_tokens
+                                  for f in checked.floors},
+                "floors_measured_with": "the tokenizer of " + checked.model,
+                "shapes_holding_every_redundancy_level": {
+                    workload: [list(shape) for shape in shapes]
+                    for workload, shapes in checked.comparable_shapes.items()}},
             "decode_wall_seconds_note": "Python-level wall clock, for bookkeeping only; "
                                         "not a throughput measurement",
             "skipped": [vars(skip) for skip in result.skipped],
@@ -85,7 +195,8 @@ def main():
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
         boundary.write_rows(result.rows, summaries, args.out, config)
         log.info("wrote %s.csv, %s.jsonl and %s.json", args.out, args.out, args.out)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

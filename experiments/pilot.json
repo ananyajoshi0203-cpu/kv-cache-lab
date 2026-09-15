@@ -1,0 +1,53 @@
+{
+  "name": "pilot",
+  "purpose": "The smallest run that could actually answer the question. Confirms the model can do both workloads uncompressed, and shows whether the scoring advantage moves with prompt fraction and with redundancy at all, before committing to the full grid.",
+  "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "model_notes": "Chosen for a 32k context, instruction following strong enough to follow a numbered step format, and open weights. It is GQA with 2 KV heads, which matters here: the per-KV-head random draw has far less head redundancy to exploit than the MHA models Random Attention reports on, so a null result for random on this model is not automatically a null result for the claim. Llama-3.2-1B-Instruct (8 KV heads) is the intended second configuration for exactly that reason.",
+  "workloads": [
+    "needle",
+    "multistep"
+  ],
+  "shapes": [
+    [
+      128,
+      256
+    ],
+    [
+      256,
+      256
+    ],
+    [
+      512,
+      64
+    ],
+    [
+      512,
+      256
+    ]
+  ],
+  "retain": [
+    0.2,
+    0.4,
+    0.6,
+    0.9
+  ],
+  "examples": 4,
+  "redundancy": null,
+  "task_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "eviction_seeds": [
+    0,
+    1,
+    2,
+    3,
+    4
+  ],
+  "seed_semantics": "task_seeds choose the task instance; eviction_seeds choose the random baseline's draw and nothing else. They are swept independently so a random method's spread can be attributed to one or the other, and deterministic methods are decoded once per task instance rather than once per draw.",
+  "require_comparable_shapes": 1,
+  "feasibility": "Computed by the preflight against the selected model's own tokenizer, never carried over from another one: run `python examples/run_preflight.py --config <this file>` and it prints the floors and the feasible cells before any inference. The sweep runs the same check and refuses to start if the grid cannot make the comparisons the study is for. Floors differ materially between tokenizers -- high redundancy needs 265 tokens under GPT-2 and 310 under Qwen2.5 -- which is why a floor measured on one model is not evidence about another."
+}
