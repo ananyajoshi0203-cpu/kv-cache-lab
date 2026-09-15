@@ -78,6 +78,12 @@ ARGUMENTS = [
                                      "methods are decoded once, not once per draw")),
     (["--examples"], dict(type=int, default=1, help="task examples per seed")),
     (["--out"], dict(default="")),
+    (["--require-comparable-shapes"], dict(type=int, default=1,
+                                           help="how many shapes must hold every redundancy "
+                                                "level before the run is allowed to start")),
+    (["--skip-preflight"], dict(action="store_true",
+                                help="run without checking the grid against the model's "
+                                     "tokenizer first. Only for debugging the runner")),
     (["--verbose"], dict(action="store_true")),
 ]
 
@@ -96,7 +102,7 @@ def build_parser(explicit_only=False):
 
 
 CONFIG_KEYS = ("model", "workloads", "methods", "shapes", "retain", "redundancy",
-               "task_seeds", "eviction_seeds", "examples")
+               "task_seeds", "eviction_seeds", "examples", "require_comparable_shapes")
 
 
 def resolve(argv=None):
@@ -124,6 +130,19 @@ def resolve(argv=None):
 def main():
     args = resolve()
     configure(verbose=args.verbose)
+
+    checked = None
+    if not args.skip_preflight:
+        from kvlab import preflight
+        checked = preflight.run(args.model, workload_keys=args.workloads, shapes=args.shapes,
+                                redundancies=args.redundancy,
+                                require_comparable_shapes=args.require_comparable_shapes)
+        log.info("\n%s", preflight.format_report(checked))
+        if not checked.ok:
+            log.error("refusing to run: the grid cannot make the comparisons it is for. "
+                      "Fix the shapes, or pass --skip-preflight if you are debugging the "
+                      "runner and do not intend to read the results.")
+            return 1
 
     result = boundary.sweep(
         args.model, workload_keys=args.workloads, shapes=args.shapes,
@@ -160,6 +179,14 @@ def main():
                                 "prompt-protected run holds prompt_length + generation_budget "
                                 "and the two numbers are never interchanged",
             "kv_bytes_kind": boundary.KV_BYTES_KIND,
+            "preflight": None if checked is None else {
+                "context_limit": checked.context_limit,
+                "prompt_floors": {f"{f.workload}/{f.redundancy}": f.minimum_prompt_tokens
+                                  for f in checked.floors},
+                "floors_measured_with": "the tokenizer of " + checked.model,
+                "shapes_holding_every_redundancy_level": {
+                    workload: [list(shape) for shape in shapes]
+                    for workload, shapes in checked.comparable_shapes.items()}},
             "decode_wall_seconds_note": "Python-level wall clock, for bookkeeping only; "
                                         "not a throughput measurement",
             "skipped": [vars(skip) for skip in result.skipped],
@@ -168,7 +195,8 @@ def main():
         os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
         boundary.write_rows(result.rows, summaries, args.out, config)
         log.info("wrote %s.csv, %s.jsonl and %s.json", args.out, args.out, args.out)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -45,8 +45,21 @@ could be freed after the prompt scorers have run.
 
 ## Sizing a configuration
 
-`kvlab.multistep.minimum_prompt_tokens` reports the shortest prompt each redundancy
-level can build before any filler. A shape whose prompt sits below that floor is
-refused rather than run, because a high-redundancy prompt that overflows its target
-moves redundancy and prompt length together and neither can then be read. Check the
-floors against your tokenizer before adding short-prompt shapes.
+Run the preflight. It loads the selected model's tokenizer and config -- never its
+weights -- and reports the prompt floor for each workload and redundancy level, which
+grid cells are feasible, and which shapes can hold every redundancy level:
+
+```bash
+python examples/run_preflight.py --config experiments/full_study.json
+```
+
+The sweep runs the same check before any inference and **refuses to start** when no
+shape can hold every redundancy level, because such a grid cannot answer the
+redundancy question however long it runs.
+
+**Floors are a property of the tokenizer, not of the workload.** The same evidence
+segments differently, and the difference is not small: high redundancy needs 265
+tokens under GPT-2 and **310** under Qwen2.5. A floor measured on one model is not
+evidence about another, and using GPT-2's would have put prompt 256 in the Qwen grid
+as if it were feasible. `full_study_preflight.json` is the report for the intended
+study, regenerated from the command above rather than hand-written.

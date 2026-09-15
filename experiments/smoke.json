@@ -24,7 +24,6 @@
   ],
   "examples": 2,
   "redundancy": null,
-  "expected_skips": "multistep at prompt 128 is feasible at low redundancy only: medium needs 165 prompt tokens and high needs 265 before any filler, so those cells are refused rather than run at the wrong prompt length.",
   "task_seeds": [
     0,
     1,
@@ -35,5 +34,7 @@
     1,
     2
   ],
-  "seed_semantics": "task_seeds choose the task instance; eviction_seeds choose the random baseline's draw and nothing else. They are swept independently so a random method's spread can be attributed to one or the other, and deterministic methods are decoded once per task instance rather than once per draw."
+  "seed_semantics": "task_seeds choose the task instance; eviction_seeds choose the random baseline's draw and nothing else. They are swept independently so a random method's spread can be attributed to one or the other, and deterministic methods are decoded once per task instance rather than once per draw.",
+  "require_comparable_shapes": 1,
+  "feasibility": "Computed by the preflight against the selected model's own tokenizer, never carried over from another one: run `python examples/run_preflight.py --config <this file>` and it prints the floors and the feasible cells before any inference. The sweep runs the same check and refuses to start if the grid cannot make the comparisons the study is for. Floors differ materially between tokenizers -- high redundancy needs 265 tokens under GPT-2 and 310 under Qwen2.5 -- which is why a floor measured on one model is not evidence about another."
 }
