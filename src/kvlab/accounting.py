@@ -42,6 +42,12 @@ class KVAccount:
     generated_length: int       # generated tokens that entered the cache
     prompt_slots: int           # retained prompt slots, over all layers and heads
     generated_slots: int
+    #: Mean original sequence index of the retained generated slots, 0.0 when there
+    #: are none. Two methods can retain the same count and still keep entirely
+    #: different parts of the trace, and this is the cheapest summary that separates
+    #: them: it moves when a method is recency-biased, and it moves between seeds of
+    #: a random method even though the count cannot.
+    generated_position_mean: float = 0.0
 
     def __post_init__(self) -> None:
         for label, slots, length in (("prompt", self.prompt_slots, self.prompt_length),
@@ -173,9 +179,13 @@ class CacheLedger:
                 "byte figures would be for a different model than the one that ran")
         prompt_slots = sum(int((tracked < self.prompt_length).sum()) for tracked in self._positions)
         total_slots = sum(int(tracked.numel()) for tracked in self._positions)
+        generated_slots = total_slots - prompt_slots
+        generated_sum = sum(float(tracked[tracked >= self.prompt_length].sum())
+                            for tracked in self._positions)
         batch = self._positions[0].shape[0]
         return KVAccount(
             model=cfg.name, layers=cfg.layers, kv_heads=cfg.n_kv_heads, head_dim=cfg.head_dim,
             dtype=dtype, prompt_length=self.prompt_length, generated_length=self.generated_length,
             prompt_slots=prompt_slots // batch,
-            generated_slots=(total_slots - prompt_slots) // batch)
+            generated_slots=generated_slots // batch,
+            generated_position_mean=generated_sum / generated_slots if generated_slots else 0.0)

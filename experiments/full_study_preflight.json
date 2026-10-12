@@ -1,0 +1,150 @@
+{
+  "model": "Qwen/Qwen2.5-1.5B-Instruct",
+  "context_limit": 32768,
+  "note": "Floors and feasibility for full_study.json, measured with the Qwen2.5 tokenizer that will run it. Regenerate with examples/run_preflight.py; do not hand-edit.",
+  "prompt_floors": {
+    "needle/none": 17,
+    "multistep/low": 124,
+    "multistep/medium": 186,
+    "multistep/high": 310
+  },
+  "infeasible_cells": [
+    {
+      "workload": "multistep",
+      "redundancy": "medium",
+      "shape": [
+        128,
+        64
+      ],
+      "reason": "the workload cannot build a prompt this short at this redundancy level: medium needs 186 tokens before any filler, target is 128 +/- 8"
+    },
+    {
+      "workload": "multistep",
+      "redundancy": "high",
+      "shape": [
+        128,
+        64
+      ],
+      "reason": "the workload cannot build a prompt this short at this redundancy level: high needs 310 tokens before any filler, target is 128 +/- 8"
+    },
+    {
+      "workload": "multistep",
+      "redundancy": "medium",
+      "shape": [
+        128,
+        256
+      ],
+      "reason": "the workload cannot build a prompt this short at this redundancy level: medium needs 186 tokens before any filler, target is 128 +/- 8"
+    },
+    {
+      "workload": "multistep",
+      "redundancy": "high",
+      "shape": [
+        128,
+        256
+      ],
+      "reason": "the workload cannot build a prompt this short at this redundancy level: high needs 310 tokens before any filler, target is 128 +/- 8"
+    },
+    {
+      "workload": "multistep",
+      "redundancy": "medium",
+      "shape": [
+        128,
+        512
+      ],
+      "reason": "the workload cannot build a prompt this short at this redundancy level: medium needs 186 tokens before any filler, target is 128 +/- 8"
+    },
+    {
+      "workload": "multistep",
+      "redundancy": "high",
+      "shape": [
+        128,
+        512
+      ],
+      "reason": "the workload cannot build a prompt this short at this redundancy level: high needs 310 tokens before any filler, target is 128 +/- 8"
+    },
+    {
+      "workload": "multistep",
+      "redundancy": "high",
+      "shape": [
+        256,
+        64
+      ],
+      "reason": "the workload cannot build a prompt this short at this redundancy level: high needs 310 tokens before any filler, target is 256 +/- 13"
+    },
+    {
+      "workload": "multistep",
+      "redundancy": "high",
+      "shape": [
+        256,
+        256
+      ],
+      "reason": "the workload cannot build a prompt this short at this redundancy level: high needs 310 tokens before any filler, target is 256 +/- 13"
+    },
+    {
+      "workload": "multistep",
+      "redundancy": "high",
+      "shape": [
+        256,
+        512
+      ],
+      "reason": "the workload cannot build a prompt this short at this redundancy level: high needs 310 tokens before any filler, target is 256 +/- 13"
+    }
+  ],
+  "shapes_holding_every_redundancy_level": {
+    "needle": [
+      [
+        128,
+        64
+      ],
+      [
+        128,
+        256
+      ],
+      [
+        128,
+        512
+      ],
+      [
+        256,
+        64
+      ],
+      [
+        256,
+        256
+      ],
+      [
+        256,
+        512
+      ],
+      [
+        384,
+        256
+      ],
+      [
+        512,
+        64
+      ],
+      [
+        512,
+        256
+      ]
+    ],
+    "multistep": [
+      [
+        384,
+        256
+      ],
+      [
+        512,
+        64
+      ],
+      [
+        512,
+        256
+      ]
+    ]
+  },
+  "ok": true,
+  "problems": []
+}

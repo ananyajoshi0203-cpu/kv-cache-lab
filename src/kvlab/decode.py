@@ -52,6 +52,7 @@ def generate_stepwise(model, ids, method, max_new_tokens: int = 64, eos_token_id
                         position_ids=position_ids, use_cache=True, output_attentions=True)
         if ledger is not None:
             ledger.append()
+        method.observe(int(next_id.reshape(-1)[0]))
         pkv = method.step(cache_to_tuples(out.past_key_values), out.attentions)
         if ledger is not None:
             ledger.compact(method, pkv)

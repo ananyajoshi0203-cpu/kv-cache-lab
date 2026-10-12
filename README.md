@@ -139,30 +139,103 @@ remains. A scorer reading one query is a different scorer wearing the same name.
 Giving them a faithful decode-time form is method design, which this phase
 deliberately does not do.
 
+### Two workloads, because the cache has two halves
+
+`needle` probes **prompt** retention: a passkey buried in filler. Its answer comes out
+within the first few generated tokens, so a budget over the generated cache has
+nothing to bite on. That is a property of the task, not a bug, and it is why it
+cannot be the only one.
+
+`multistep` gives the **generated** cache something to do. Quantities are stated in
+the prompt and a chain of operations combines them, each step consuming the running
+total the model just wrote, so the natural way to answer is to read back what it
+already wrote. Scored on the last integer written and on nothing about the shape of
+the reasoning; chains whose answer equals an operand or an intermediate are rejected
+and redrawn, so a model that copies a number or truncates its trace cannot score by
+accident.
+
+**It does not follow that the answer requires the trace.** Every fact and every
+operation is in the prompt, so a model with its prompt cache intact can in principle
+recompute from scratch. No deterministic, automatically scored task can rule that out
+by construction — being scorable means the answer is a function of the prompt. So it
+is measured instead. `kvlab.ablation` keeps the prompt and removes generated KV **by
+token class**: one arm takes the positions holding digits first, the other takes
+everything else first, at the same generation budget and therefore the same retained
+KV. If the numeric arm degrades and the other does not, the model was reading its own
+intermediate results out of the cache. If they degrade alike, the trace was not
+carrying the computation and the workload needs redesigning before its generated axis
+is worth reporting. Until that has been run on a model that can do the task,
+**generated-axis results are provisional**.
+
+### Redundancy is the second independent variable
+
+`multistep` can state each fact once, twice or four times in genuinely different
+sentences, dealt round by round so a fact's restatements land at different depths
+rather than clustering, while filler shrinks to hold the prompt at its target length.
+Same facts, same operations, same answer: the only thing that moves is the share of
+prompt KV carrying information the model has already seen elsewhere.
+
+That is what separates the two hypotheses. If scoring matters because unique
+information is concentrated in the prompt, advantage should track the prompt's share
+of the context. If it matters because of information density, redundancy should
+predict the crossover better than context fraction does.
+
+Evidence has a floor, and the harness enforces it: 115 prompt tokens at low
+redundancy, 165 at medium, 265 at high, before any filler. A prompt target below its
+level's floor is **refused with a reason**, never quietly run long — otherwise
+redundancy and prompt length would move together and neither could be read.
+
 ### What is measured
 
-Retrieval accuracy, not perplexity — the repository already knows perplexity hides
-the failure eviction actually causes. Alongside it, every row carries prompt KV,
-generated KV and total KV retained, the analytical KV bytes behind them, the
-compression ratio, and the nominal budget that method was handed. Seeds 0–4 are
-swept and the summary reports mean and dispersion, because one lucky draw of a
-random method is not a result and neither is one unlucky one.
+Task accuracy, not perplexity — the repository already knows perplexity hides the
+failure eviction actually causes. Alongside it, every row carries the workload and
+redundancy level, prompt KV, generated KV and total KV retained, the mean original
+position of the retained generated KV, the analytical KV bytes, the compression
+ratio actually achieved, and the nominal budget that method was handed.
 
 Two things the numbers do **not** claim. The byte figures are **analytical** — slot
-counts multiplied through the cost model, never allocator readings — and the
-per-row wall clock is Python-level bookkeeping, not a throughput measurement.
+counts multiplied through the cost model, never allocator readings — and the per-row
+wall clock is Python-level bookkeeping, not a throughput measurement.
+
+### Analysis, offline
+
+The sweep writes rows; a separate script turns them into cells and figures without
+touching a model:
 
 ```bash
-python examples/run_boundary_sweep.py --prompts 128,384 --gen 64,384 \
-    --retain 0.2,0.35,0.5,0.75,0.9 --out results/boundary
+python examples/run_boundary_sweep.py --config experiments/smoke.json --out results/smoke
+python examples/run_boundary_analysis.py --rows results/smoke.jsonl \
+    --out results/analysis --plots results/plots
 ```
 
-The passkey workload has one limitation worth stating up front: the model answers
-within the first few generated tokens, so a budget over the *generated* cache
-cannot move that score. Making the generated axis bite needs a workload whose
-answer depends on its own trace (reasoning, multi-instruction), which is why
-`Workload` is a two-function interface — adding one is adding a `Workload`, not
-editing the runner.
+The quantity is a continuous difference and not a verdict:
+
+```
+scoring_advantage = scored_method_metric - random_metric
+```
+
+reported per cell with a bootstrap interval and **no threshold** — where a difference
+stops mattering is a judgement about the difference, and a cut-off buried in a tool
+is a judgement nobody sees being made. The resampling unit is one `(seed, example)`
+pair, resampled *paired* for an advantage because both methods ran on the same task
+instance. No p-values.
+
+Four checks run before any of it is worth reading, and each flags the cell rather
+than dropping it: whether the **full cache** can do the task at all (if not, nothing
+below it is evidence about compression), whether every method in a cell really held
+**equal memory**, whether the **requested** retained fraction matches the **achieved**
+one, and whether the random baseline's seeds actually retained different positions.
+
+Figures: task metric against retained fraction per method and shape; advantage
+against the prompt's share of context; advantage against the generated share, needle
+and multistep drawn apart; and advantage as a heatmap over prompt and generation
+length. Cells whose control failed are drawn hollow, not hidden.
+
+`experiments/` holds three checked-in configurations — a CPU smoke run that proves
+only the plumbing, a pilot, and the full grid — with their compute estimates. **Do
+not read distilgpt2 results as evidence about modern KV-cache behaviour**: it cannot
+do `multistep` at all, and every one of its multistep cells is expected to be flagged
+unsolvable.
 
 ## Architecture
 
@@ -178,6 +251,9 @@ kv-cache-lab/
     decode.py       step-wise decode loop with a per-step method hook
     accounting.py   prompt KV vs generated KV, and the analytical bytes behind them
     boundary.py     the boundary sweep: one target cache, a budget per method
+    multistep.py    a task whose answer lives in the model's own generated trace
+    analysis.py     offline: scoring advantage, bootstrap intervals, sanity flags
+    plots.py        the four figures, drawn from saved analysis only
     evals.py        standard benchmarks (RULER, LongBench, SCBench, IFEval)
     needle.py       passkey retrieval eval, runnable on CPU
     benchmark.py    iso-ratio runner with CSV/JSON output
@@ -216,10 +292,13 @@ python examples/run_needle.py --method snapkv --ratios 0,0.5,0.75
 ```
 
 The boundary sweep asks where a score starts to beat a coin flip, holding every
-method to the same final cache size:
+method to the same final cache size, then the analysis turns its rows into cells and
+figures without rerunning anything:
 
 ```bash
-python examples/run_boundary_sweep.py --prompts 128,384 --gen 64,384 --out results/boundary
+python examples/run_boundary_sweep.py --config experiments/smoke.json --out results/smoke
+python examples/run_boundary_analysis.py --rows results/smoke.jsonl \
+    --out results/analysis --plots results/plots
 ```
 
 For real long-context methods, use KVPress through the same interface:
